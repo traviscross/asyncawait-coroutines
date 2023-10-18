@@ -12,14 +12,10 @@ use core::{
 
 #[cfg(feature = "std")]
 mod debug {
-  use super::{Coro, CoroK, Debug, Future, Yielder};
+  use super::{Coro, CoroK, Debug};
   use std::fmt;
 
-  impl<T, R, U, F, G> Debug for CoroK<T, R, U, F, G>
-  where
-    F: FnOnce(Yielder<T, R>) -> G,
-    G: Future<Output = U>,
-  {
+  impl<T, R, U, F, G> Debug for CoroK<T, R, U, F, G> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       match self {
         Self::Init(_, _) => write!(f, "Init(_, _)"),
@@ -31,8 +27,6 @@ mod debug {
 
   impl<T, R, U, F, G> Debug for Coro<T, R, U, F, G>
   where
-    F: FnOnce(Yielder<T, R>) -> G,
-    G: Future<Output = U>,
     T: Debug,
     R: Debug,
   {
@@ -115,21 +109,13 @@ where
   }
 }
 
-enum CoroK<T, R, U, F, G>
-where
-  F: FnOnce(Yielder<T, R>) -> G,
-  G: Future<Output = U>,
-{
+enum CoroK<T, R, U, F, G> {
   Init(F, PhantomData<(T, R, U)>),
   Gen(G),
   Temporary,
 }
 
-pub struct Coro<T, R, U, F, G>
-where
-  F: FnOnce(Yielder<T, R>) -> G,
-  G: Future<Output = U>,
-{
+pub struct Coro<T, R, U, F, G> {
   g: CoroK<T, R, U, F, G>, // Needs reference to `y`.
   y: YielderState<T, R>,
   _p: (PhantomData<(T, R, U)>, PhantomPinned),
