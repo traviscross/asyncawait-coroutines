@@ -236,7 +236,7 @@ where
 }
 
 #[test]
-fn test() {
+fn test_steps() {
   let mut g = Coro::new(move |mut y| async move {
     assert_eq!(11, dbg!(y.r#yield(0u8).await));
     assert_eq!(12, dbg!(y.r#yield(1u8).await));
