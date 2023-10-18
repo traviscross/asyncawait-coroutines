@@ -47,6 +47,7 @@ macro_rules! dbg {
     ($($x:expr),+ $(,)?) => { ($($crate::dbg!($x)),+,) };
 }
 
+#[doc(hidden)]
 pub trait Captures<T: ?Sized> {}
 impl<T: ?Sized, U: ?Sized> Captures<T> for U {}
 
