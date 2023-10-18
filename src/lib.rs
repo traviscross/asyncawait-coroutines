@@ -91,17 +91,16 @@ where
     let mut x = Some(x);
     core::future::poll_fn(move |_| {
       match unsafe { ptr::replace(self.0, YielderState::Temporary) } {
-        YielderState::Input(r) => {
+        YielderState::Temporary => {
           unsafe {
             *self.0 = YielderState::Output(x.take().unwrap());
           }
           dbg!(unsafe { &*self.0 });
-          dbg!(Poll::Ready(r))
-        }
-        YielderState::Output(x) => {
-          unsafe { *self.0 = YielderState::Output(x) };
-          dbg!(unsafe { &*self.0 });
           dbg!(Poll::Pending)
+        }
+        YielderState::Input(r) => {
+          dbg!(unsafe { &*self.0 });
+          dbg!(Poll::Ready(r))
         }
         _ => unreachable!(),
       }
@@ -138,13 +137,24 @@ where
 #[derive(Debug)]
 pub enum Output<T, U> {
   Streaming(T),
-  Done(Option<T>, U),
+  Done(U),
 }
 
 pub trait Resumable {
   type StreamOutput;
   type FinalOutput;
   type Input;
+
+  fn initialize(self: &mut Pin<&mut Self>);
+
+  fn advance(
+    self: &mut Pin<&mut Self>,
+  ) -> Output<Self::StreamOutput, Self::FinalOutput>;
+
+  fn start(
+    self: &mut Pin<&mut Self>,
+  ) -> Output<Self::StreamOutput, Self::FinalOutput>;
+
   fn resume(
     self: &mut Pin<&mut Self>,
     x: Self::Input,
@@ -162,39 +172,37 @@ where
   type StreamOutput = T;
   type FinalOutput = U;
   type Input = R;
-  fn resume(
-    self: &mut Pin<&mut Self>,
-    x: Self::Input,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
-    let self_ = self.as_mut();
-    let self_ = unsafe { self_.get_unchecked_mut() };
+
+  fn initialize(self: &mut Pin<&mut Self>) {
+    let self_ = unsafe { self.as_mut().get_unchecked_mut() };
     dbg!(&self_);
     let y = addr_of_mut!(self_.y);
     dbg!(unsafe { &*y });
     assert!(matches!(unsafe { &*y }, YielderState::Temporary));
-    unsafe { *y = YielderState::Input(x) };
     match mem::replace(&mut self_.g, CoroK::Temporary) {
       CoroK::Init(f, _) => {
         let yielder = Yielder::new(y);
         self_.g = CoroK::Gen(f(yielder));
       }
-      CoroK::Gen(g) => self_.g = CoroK::Gen(g),
-      CoroK::Temporary => unreachable!(),
-    }
+      _ => unreachable!(),
+    };
     dbg!(&self_);
+  }
+
+  fn advance(
+    self: &mut Pin<&mut Self>,
+  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+    let self_ = unsafe { self.as_mut().get_unchecked_mut() };
+    dbg!(&self_);
+    let y = addr_of_mut!(self_.y);
     let CoroK::Gen(ref mut g) = self_.g else { unreachable!() };
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
       Poll::Ready(u) => {
         dbg!(&self_);
         dbg!(unsafe { &*y });
-        let t =
-          match unsafe { ptr::replace(y, YielderState::Temporary) } {
-            YielderState::Output(t) => Some(t),
-            YielderState::Input(_) => None,
-            _ => unreachable!(),
-          };
-        dbg!(Output::Done(t, u))
+        assert!(matches!(unsafe { &*y }, YielderState::Temporary));
+        dbg!(Output::Done(u))
       }
       Poll::Pending => {
         dbg!(&self_);
@@ -208,6 +216,26 @@ where
       }
     }
   }
+
+  fn start(
+    self: &mut Pin<&mut Self>,
+  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+    self.initialize();
+    self.advance()
+  }
+
+  fn resume(
+    self: &mut Pin<&mut Self>,
+    x: Self::Input,
+  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+    let self_ = unsafe { self.as_mut().get_unchecked_mut() };
+    dbg!(&self_);
+    let y = addr_of_mut!(self_.y);
+    dbg!(unsafe { &*y });
+    assert!(matches!(unsafe { &*y }, YielderState::Temporary));
+    unsafe { *y = YielderState::Input(x) };
+    self.advance()
+  }
 }
 
 #[test]
@@ -220,13 +248,11 @@ fn test() {
     dbg!(4u8)
   });
   let mut g = pin!(g);
-  assert!(matches!(dbg!(g.resume(11u8)), Output::Streaming(0u8)));
-  assert!(matches!(dbg!(g.resume(12u8)), Output::Streaming(1u8)));
-  assert!(matches!(dbg!(g.resume(13u8)), Output::Streaming(2u8)));
-  assert!(matches!(
-    dbg!(g.resume(14u8)),
-    Output::Done(Some(3u8), 4u8)
-  ));
+  assert!(matches!(dbg!(g.start()), Output::Streaming(0u8)));
+  assert!(matches!(dbg!(g.resume(11u8)), Output::Streaming(1u8)));
+  assert!(matches!(dbg!(g.resume(12u8)), Output::Streaming(2u8)));
+  assert!(matches!(dbg!(g.resume(13u8)), Output::Streaming(3u8)));
+  assert!(matches!(dbg!(g.resume(14u8)), Output::Done(4u8)));
 }
 
 #[test]
@@ -234,5 +260,5 @@ fn test_no_yield() {
   let mut g =
     Coro::new(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
   let mut g = pin!(g);
-  assert!(matches!(dbg!(g.resume(14u8)), Output::Done(None, 4u8)));
+  assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
 }
