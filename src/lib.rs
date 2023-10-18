@@ -23,8 +23,9 @@ pub trait Captures<T: ?Sized> {}
 impl<T: ?Sized, U: ?Sized> Captures<T> for U {}
 
 const fn nop_rawwaker() -> RawWaker {
+  fn nop(_: *const ()) {}
   const VTAB: RawWakerVTable =
-    RawWakerVTable::new(|_| nop_rawwaker(), |_| (), |_| (), |_| ());
+    RawWakerVTable::new(|_| nop_rawwaker(), nop, nop, nop);
   RawWaker::new(&() as *const (), &VTAB)
 }
 
