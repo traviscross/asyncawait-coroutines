@@ -236,53 +236,58 @@ where
   }
 }
 
-#[test]
-fn test_steps() {
-  let mut g = Coro::new(move |mut y| async move {
-    assert_eq!(11, dbg!(y.r#yield(0u8).await));
-    assert_eq!(12, dbg!(y.r#yield(1u8).await));
-    assert_eq!(13, dbg!(y.r#yield(2u8).await));
-    assert_eq!(14, dbg!(y.r#yield(3u8).await));
-    dbg!(4u8)
-  });
-  let mut g = pin!(g);
-  assert!(matches!(dbg!(g.start()), Output::Streaming(0u8)));
-  assert!(matches!(dbg!(g.resume(11u8)), Output::Streaming(1u8)));
-  assert!(matches!(dbg!(g.resume(12u8)), Output::Streaming(2u8)));
-  assert!(matches!(dbg!(g.resume(13u8)), Output::Streaming(3u8)));
-  assert!(matches!(dbg!(g.resume(14u8)), Output::Done(4u8)));
-}
+#[cfg(test)]
+mod tests {
+  use super::*;
 
-#[test]
-fn test_no_yield() {
-  let mut g =
-    Coro::new(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
-  let mut g = pin!(g);
-  assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
-}
-
-#[test]
-fn test_dangling_1() {
-  let Output::Done(boom) = ({
-    let mut g = Coro::new(|y: Yielder<(), ()>| async move { y });
-    let mut g = pin!(g);
-    g.start()
-  }) else {
-    unreachable!()
-  };
-  dbg!(unsafe { &*boom.0 }); // Pointer is dangling here.
-}
-
-#[test]
-fn test_dangling_2() {
-  let mut boom = None;
-  {
-    let mut g = Coro::new(|y: Yielder<(), ()>| {
-      _ = boom.insert(y);
-      async move {}
+  #[test]
+  fn test_steps() {
+    let mut g = Coro::new(move |mut y| async move {
+      assert_eq!(11, dbg!(y.r#yield(0u8).await));
+      assert_eq!(12, dbg!(y.r#yield(1u8).await));
+      assert_eq!(13, dbg!(y.r#yield(2u8).await));
+      assert_eq!(14, dbg!(y.r#yield(3u8).await));
+      dbg!(4u8)
     });
     let mut g = pin!(g);
-    g.start();
+    assert!(matches!(dbg!(g.start()), Output::Streaming(0u8)));
+    assert!(matches!(dbg!(g.resume(11u8)), Output::Streaming(1u8)));
+    assert!(matches!(dbg!(g.resume(12u8)), Output::Streaming(2u8)));
+    assert!(matches!(dbg!(g.resume(13u8)), Output::Streaming(3u8)));
+    assert!(matches!(dbg!(g.resume(14u8)), Output::Done(4u8)));
   }
-  dbg!(unsafe { &*boom.unwrap().0 }); // Pointer is dangling here.
+
+  #[test]
+  fn test_no_yield() {
+    let mut g =
+      Coro::new(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
+    let mut g = pin!(g);
+    assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
+  }
+
+  #[test]
+  fn test_dangling_1() {
+    let Output::Done(boom) = ({
+      let mut g = Coro::new(|y: Yielder<(), ()>| async move { y });
+      let mut g = pin!(g);
+      g.start()
+    }) else {
+      unreachable!()
+    };
+    dbg!(unsafe { &*boom.0 }); // Pointer is dangling here.
+  }
+
+  #[test]
+  fn test_dangling_2() {
+    let mut boom = None;
+    {
+      let mut g = Coro::new(|y: Yielder<(), ()>| {
+        _ = boom.insert(y);
+        async move {}
+      });
+      let mut g = pin!(g);
+      g.start();
+    }
+    dbg!(unsafe { &*boom.unwrap().0 }); // Pointer is dangling here.
+  }
 }
