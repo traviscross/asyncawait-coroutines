@@ -9,8 +9,42 @@ use core::{
   ptr::{self, addr_of_mut},
   task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
+
 #[cfg(feature = "std")]
-use std::fmt;
+mod debug {
+  use super::{Coro, CoroK, Debug, Future, Yielder};
+  use std::fmt;
+
+  impl<T, R, U, F, G> Debug for CoroK<T, R, U, F, G>
+  where
+    F: FnOnce(Yielder<T, R>) -> G,
+    G: Future<Output = U>,
+  {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      match self {
+        Self::Init(_, _) => write!(f, "Init(_, _)"),
+        Self::Gen(_) => write!(f, "Gen(_)"),
+        Self::Temporary => write!(f, "Temporary"),
+      }
+    }
+  }
+
+  impl<T, R, U, F, G> Debug for Coro<T, R, U, F, G>
+  where
+    F: FnOnce(Yielder<T, R>) -> G,
+    G: Future<Output = U>,
+    T: Debug,
+    R: Debug,
+  {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      f.debug_struct("Coro")
+        .field("g", &self.g)
+        .field("y", &self.y)
+        .field("_p", &self._p)
+        .finish()
+    }
+  }
+}
 
 #[cfg(not(feature = "std"))]
 macro_rules! dbg {
@@ -91,21 +125,6 @@ where
   Temporary,
 }
 
-#[cfg(feature = "std")]
-impl<T, R, U, F, G> Debug for CoroK<T, R, U, F, G>
-where
-  F: FnOnce(Yielder<T, R>) -> G,
-  G: Future<Output = U>,
-{
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Self::Init(_, _) => write!(f, "Init(_, _)"),
-      Self::Gen(_) => write!(f, "Gen(_)"),
-      Self::Temporary => write!(f, "Temporary"),
-    }
-  }
-}
-
 pub struct Coro<T, R, U, F, G>
 where
   F: FnOnce(Yielder<T, R>) -> G,
@@ -114,23 +133,6 @@ where
   g: CoroK<T, R, U, F, G>, // Needs reference to `y`.
   y: YielderState<T, R>,
   _p: (PhantomData<(T, R, U)>, PhantomPinned),
-}
-
-#[cfg(feature = "std")]
-impl<T, R, U, F, G> Debug for Coro<T, R, U, F, G>
-where
-  F: FnOnce(Yielder<T, R>) -> G,
-  G: Future<Output = U>,
-  T: Debug,
-  R: Debug,
-{
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_struct("Coro")
-      .field("g", &self.g)
-      .field("y", &self.y)
-      .field("_p", &self._p)
-      .finish()
-  }
 }
 
 impl<T, R, U, F, G> Coro<T, R, U, F, G>
