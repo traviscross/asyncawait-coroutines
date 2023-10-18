@@ -260,3 +260,29 @@ fn test_no_yield() {
   let mut g = pin!(g);
   assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
 }
+
+#[test]
+fn test_dangling_1() {
+  let Output::Done(boom) = ({
+    let mut g = Coro::new(|y: Yielder<(), ()>| async move { y });
+    let mut g = pin!(g);
+    g.start()
+  }) else {
+    unreachable!()
+  };
+  dbg!(unsafe { &*boom.0 }); // Pointer is dangling here.
+}
+
+#[test]
+fn test_dangling_2() {
+  let mut boom = None;
+  {
+    let mut g = Coro::new(|y: Yielder<(), ()>| {
+      _ = boom.insert(y);
+      async move {}
+    });
+    let mut g = pin!(g);
+    g.start();
+  }
+  dbg!(unsafe { &*boom.unwrap().0 }); // Pointer is dangling here.
+}
