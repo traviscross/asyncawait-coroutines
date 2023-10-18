@@ -147,18 +147,26 @@ pub trait Resumable {
 
   fn initialize(self: &mut Pin<&mut Self>);
 
+  fn feed(self: &mut Pin<&mut Self>, x: Self::Input);
+
   fn advance(
     self: &mut Pin<&mut Self>,
   ) -> Output<Self::StreamOutput, Self::FinalOutput>;
 
   fn start(
     self: &mut Pin<&mut Self>,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput>;
+  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+    self.initialize();
+    self.advance()
+  }
 
   fn resume(
     self: &mut Pin<&mut Self>,
     x: Self::Input,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput>;
+  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+    self.feed(x);
+    self.advance()
+  }
 }
 
 impl<T, R, U, F, G> Resumable for Coro<T, R, U, F, G>
@@ -189,6 +197,15 @@ where
     dbg!(&self_);
   }
 
+  fn feed(self: &mut Pin<&mut Self>, x: Self::Input) {
+    let self_ = unsafe { self.as_mut().get_unchecked_mut() };
+    dbg!(&self_);
+    let y = addr_of_mut!(self_.y);
+    dbg!(unsafe { &*y });
+    assert!(matches!(unsafe { &*y }, YielderState::Temporary));
+    unsafe { *y = YielderState::Input(x) };
+  }
+
   fn advance(
     self: &mut Pin<&mut Self>,
   ) -> Output<Self::StreamOutput, Self::FinalOutput> {
@@ -215,26 +232,6 @@ where
         dbg!(Output::Streaming(t))
       }
     }
-  }
-
-  fn start(
-    self: &mut Pin<&mut Self>,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
-    self.initialize();
-    self.advance()
-  }
-
-  fn resume(
-    self: &mut Pin<&mut Self>,
-    x: Self::Input,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
-    let self_ = unsafe { self.as_mut().get_unchecked_mut() };
-    dbg!(&self_);
-    let y = addr_of_mut!(self_.y);
-    dbg!(unsafe { &*y });
-    assert!(matches!(unsafe { &*y }, YielderState::Temporary));
-    unsafe { *y = YielderState::Input(x) };
-    self.advance()
   }
 }
 
