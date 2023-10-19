@@ -290,4 +290,25 @@ mod tests {
     }
     dbg!(unsafe { &*boom.unwrap().0 }); // Pointer is dangling here.
   }
+
+  #[test]
+  fn test_dangling_3() {
+    let mut g = Coro::new(|y: Yielder<(), ()>| {
+      drop(y);
+      async move {}
+    });
+    let mut g = pin!(g);
+    g.start();
+    dbg!(&g.y);
+  }
+
+  #[test]
+  fn test_dangling_4() {
+    let mut g = Coro::new(|mut y: Yielder<(), ()>| async move {
+      y.r#yield(()).await;
+    });
+    let mut g = pin!(g);
+    g.start();
+    dbg!(&g.y);
+  }
 }
