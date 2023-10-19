@@ -137,7 +137,7 @@ where
 
 #[derive(Debug)]
 pub enum Output<T, U> {
-  Streaming(T),
+  Next(T),
   Done(U),
 }
 
@@ -230,7 +230,7 @@ where
         else {
           unreachable!()
         };
-        dbg!(Output::Streaming(t))
+        dbg!(Output::Next(t))
       }
     }
   }
@@ -243,18 +243,18 @@ mod tests {
   #[test]
   fn test_steps() {
     let mut g = Coro::new(move |mut y| async move {
-      assert_eq!(11, dbg!(y.r#yield(0u8).await));
-      assert_eq!(12, dbg!(y.r#yield(1u8).await));
-      assert_eq!(13, dbg!(y.r#yield(2u8).await));
-      assert_eq!(14, dbg!(y.r#yield(3u8).await));
+      assert_eq!(11, y.r#yield(0u8).await);
+      assert_eq!(12, y.r#yield(1u8).await);
+      assert_eq!(13, y.r#yield(2u8).await);
+      assert_eq!(14, y.r#yield(3u8).await);
       dbg!(4u8)
     });
     let mut g = pin!(g);
-    assert!(matches!(dbg!(g.start()), Output::Streaming(0u8)));
-    assert!(matches!(dbg!(g.resume(11u8)), Output::Streaming(1u8)));
-    assert!(matches!(dbg!(g.resume(12u8)), Output::Streaming(2u8)));
-    assert!(matches!(dbg!(g.resume(13u8)), Output::Streaming(3u8)));
-    assert!(matches!(dbg!(g.resume(14u8)), Output::Done(4u8)));
+    assert!(matches!(g.start(), Output::Next(0u8)));
+    assert!(matches!(g.resume(11u8), Output::Next(1u8)));
+    assert!(matches!(g.resume(12u8), Output::Next(2u8)));
+    assert!(matches!(g.resume(13u8), Output::Next(3u8)));
+    assert!(matches!(g.resume(14u8), Output::Done(4u8)));
   }
 
   #[test]
