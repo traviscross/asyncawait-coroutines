@@ -111,7 +111,7 @@ where
 
 enum CoroK<T, R, U, F, G> {
   Init(F, PhantomData<(T, R, U)>),
-  Gen(G),
+  Gen(G, PhantomData<(T, R, U)>),
   Temporary,
 }
 
@@ -191,7 +191,7 @@ where
     match mem::replace(&mut self_.g, CoroK::Temporary) {
       CoroK::Init(f, _) => {
         let yielder = Yielder::new(y);
-        self_.g = CoroK::Gen(f(yielder));
+        self_.g = CoroK::Gen(f(yielder), PhantomData);
       }
       _ => unreachable!(),
     };
@@ -213,7 +213,7 @@ where
     let self_ = unsafe { self.as_mut().get_unchecked_mut() };
     dbg!(&self_);
     let y = addr_of_mut!(self_.y);
-    let CoroK::Gen(ref mut g) = self_.g else { unreachable!() };
+    let CoroK::Gen(ref mut g, _) = self_.g else { unreachable!() };
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
       Poll::Ready(u) => {
