@@ -175,25 +175,25 @@ pub trait Resumable {
   type FinalOutput;
   type Input;
 
-  fn initialize<'m>(self: Pin<&'m mut Self>);
+  fn initialize(self: Pin<&mut Self>);
 
-  fn feed<'m>(self: Pin<&'m mut Self>, x: Self::Input);
+  fn feed(self: Pin<&mut Self>, x: Self::Input);
 
-  fn advance<'m>(
-    self: Pin<&'m mut Self>,
-  ) -> Output<'m, Self::StreamOutput, Self::FinalOutput>;
+  fn advance(
+    self: Pin<&mut Self>,
+  ) -> Output<'_, Self::StreamOutput, Self::FinalOutput>;
 
-  fn start<'m>(
-    mut self: Pin<&'m mut Self>,
-  ) -> Output<'m, Self::StreamOutput, Self::FinalOutput> {
+  fn start(
+    mut self: Pin<&mut Self>,
+  ) -> Output<'_, Self::StreamOutput, Self::FinalOutput> {
     self.as_mut().initialize();
     self.advance()
   }
 
-  fn resume<'m>(
-    mut self: Pin<&'m mut Self>,
+  fn resume(
+    mut self: Pin<&mut Self>,
     x: Self::Input,
-  ) -> Output<'m, Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<'_, Self::StreamOutput, Self::FinalOutput> {
     self.as_mut().feed(x);
     self.advance()
   }
@@ -212,10 +212,10 @@ where
   type FinalOutput = U;
   type Input = R;
 
-  fn initialize<'m>(self: Pin<&'m mut Self>) {
+  fn initialize(self: Pin<&mut Self>) {
     let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
-    let y: &'m YielderStateCell<T, R> = dbg!(&self_.y);
+    let y: &'_ YielderStateCell<T, R> = dbg!(&self_.y);
     match y.replace(YielderState::Temporary) {
       YielderState::Temporary => {}
       _ => unreachable!(),
@@ -232,7 +232,7 @@ where
     dbg!(&self_);
   }
 
-  fn feed<'m>(self: Pin<&'m mut Self>, x: Self::Input) {
+  fn feed(self: Pin<&mut Self>, x: Self::Input) {
     let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
     let y = dbg!(&self_.y);
@@ -243,9 +243,9 @@ where
     y.set(YielderState::Input(x));
   }
 
-  fn advance<'m>(
-    self: Pin<&'m mut Self>,
-  ) -> Output<'m, Self::StreamOutput, Self::FinalOutput> {
+  fn advance(
+    self: Pin<&mut Self>,
+  ) -> Output<'_, Self::StreamOutput, Self::FinalOutput> {
     let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
     let CoroK::Gen(ref mut g, _) = self_.g else { unreachable!() };
