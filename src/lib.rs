@@ -165,9 +165,9 @@ where
 }
 
 #[derive(Debug)]
-pub enum Output<T, U> {
-  Next(T),
-  Done(U),
+pub enum Output<'s, T, U> {
+  Next(T, PhantomData<*mut &'s ()>),
+  Done(U, PhantomData<*mut &'s ()>),
 }
 
 pub trait Resumable<'s> {
@@ -181,21 +181,21 @@ pub trait Resumable<'s> {
 
   fn advance<'m>(
     self: Pin<&'m mut Self>,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput>;
+  ) -> Output<'m, Self::StreamOutput, Self::FinalOutput>;
 
   fn start<'m>(
     mut self: Pin<&'m mut Self>,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<'m, Self::StreamOutput, Self::FinalOutput> {
     self.as_mut().initialize();
-    self.as_mut().advance()
+    self.advance()
   }
 
   fn resume<'m>(
     mut self: Pin<&'m mut Self>,
     x: Self::Input,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<'m, Self::StreamOutput, Self::FinalOutput> {
     self.as_mut().feed(x);
-    self.as_mut().advance()
+    self.advance()
   }
 }
 
@@ -206,6 +206,7 @@ where
   T: Debug + 's,
   R: Debug + 's,
   U: Debug,
+  Self: 's,
 {
   type StreamOutput = T;
   type FinalOutput = U;
@@ -221,33 +222,6 @@ where
     }
     match mem::replace(&mut self_.g, CoroK::Temporary) {
       CoroK::Init(f, _) => {
-        // This is the critical (and questionable) bit for the
-        // self-referential data structure to work.
-        //
-        // We have a pinned reference to `Self` with lifetime `'m`.
-        // From that, we get a reference to the state with a lifetime
-        // of `'m`.  But `Self` has a lifetime of `'s`.  We need a
-        // reference to the state with a lifetime of `'s` to be able
-        // to store it in the state.  Can we do that?
-        //
-        // We can't say `'m: 's`.  That breaks everything.  In
-        // particular, it means that we can't reborrow the pin using
-        // `as_mut`.  And calling between our methods doesn't work
-        // because we're trying to borrow for slightly too long.
-        //
-        // But the pin guarantee says that the memory behind this
-        // reference won't be freed or repurpose until drop runs for
-        // the `Self` type.
-        //
-        // Plus, of course, we *know* that this state is part of the
-        // `Self` type.
-        //
-        // The deeper question is, do we know that `'s` is exactly the
-        // lifetime of the `Self` type, or could it be longer?  No, we
-        // do not.  That's why this isn't safe.
-        //
-        // For this to be safe, we'd need to know that `'s` is
-        // *exactly* the lifetime of `Self`.
         let y: &'s YielderStateCell<T, R> =
           unsafe { mem::transmute(y) };
         let yielder = Yielder::<'s, T, R>::new(y);
@@ -271,7 +245,7 @@ where
 
   fn advance<'m>(
     self: Pin<&'m mut Self>,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<'m, Self::StreamOutput, Self::FinalOutput> {
     let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
     let CoroK::Gen(ref mut g, _) = self_.g else { unreachable!() };
@@ -284,13 +258,15 @@ where
           YielderState::Temporary => {}
           _ => unreachable!(),
         }
-        dbg!(Output::Done(u))
+        dbg!(Output::Done(u, PhantomData))
       }
       Poll::Pending => {
         dbg!(&self_);
         let y = dbg!(&self_.y);
         match y.replace(YielderState::Temporary) {
-          YielderState::Output(t) => dbg!(Output::Next(t)),
+          YielderState::Output(t) => {
+            dbg!(Output::Next(t, PhantomData))
+          }
           _ => unreachable!(),
         }
       }
@@ -312,11 +288,11 @@ mod tests {
       dbg!(4u8)
     });
     let mut g = pin!(g);
-    assert!(matches!(g.as_mut().start(), Output::Next(0u8)));
-    assert!(matches!(g.as_mut().resume(11u8), Output::Next(1u8)));
-    assert!(matches!(g.as_mut().resume(12u8), Output::Next(2u8)));
-    assert!(matches!(g.as_mut().resume(13u8), Output::Next(3u8)));
-    assert!(matches!(g.resume(14u8), Output::Done(4u8)));
+    assert!(matches!(g.as_mut().start(), Output::Next(0u8, _)));
+    assert!(matches!(g.as_mut().resume(11u8), Output::Next(1u8, _)));
+    assert!(matches!(g.as_mut().resume(12u8), Output::Next(2u8, _)));
+    assert!(matches!(g.as_mut().resume(13u8), Output::Next(3u8, _)));
+    assert!(matches!(g.resume(14u8), Output::Done(4u8, _)));
   }
 
   #[test]
@@ -324,12 +300,13 @@ mod tests {
     let mut g =
       Coro::new(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
     let g = pin!(g);
-    assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
+    assert!(matches!(dbg!(g.start()), Output::Done(4u8, _)));
   }
 
+  #[cfg(False)]
   #[test]
   fn test_dangling_1() {
-    let Output::Done(boom) = ({
+    let Output::Done(boom, _) = ({
       let mut g = Coro::new(|y: Yielder<(), ()>| async move { y });
       let g = pin!(g);
       g.start()
@@ -339,6 +316,7 @@ mod tests {
     dbg!(&boom.0); // Pointer is dangling here.
   }
 
+  #[cfg(False)]
   #[test]
   fn test_dangling_2() {
     let mut boom = None;
