@@ -332,7 +332,7 @@ mod tests {
   }
 
   #[test]
-  fn test_dangling_3() {
+  fn test_drop_1() {
     let mut g = Coro::new(|y: Yielder<(), ()>| {
       drop(y);
       async move {}
@@ -343,7 +343,7 @@ mod tests {
   }
 
   #[test]
-  fn test_dangling_4() {
+  fn test_drop_2() {
     let mut g = Coro::new(|mut y: Yielder<(), ()>| async move {
       y.r#yield(()).await;
     });
