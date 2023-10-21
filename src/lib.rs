@@ -170,7 +170,7 @@ pub enum Output<'s, T, U> {
   Done(U, PhantomData<*mut &'s ()>),
 }
 
-pub trait Resumable<'s> {
+pub trait Resumable {
   type StreamOutput;
   type FinalOutput;
   type Input;
@@ -199,7 +199,7 @@ pub trait Resumable<'s> {
   }
 }
 
-impl<'s, T, R, U, F, G> Resumable<'s> for Coro<'s, T, R, U, F, G>
+impl<'s, T, R, U, F, G> Resumable for Coro<'s, T, R, U, F, G>
 where
   F: FnOnce(Yielder<'s, T, R>) -> G,
   G: Future<Output = U>,
