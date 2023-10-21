@@ -1,31 +1,30 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use core::{
+  cell::Cell,
   fmt::Debug,
   future::Future,
   marker::{PhantomData, PhantomPinned},
   mem,
   pin::{pin, Pin},
-  ptr::{self, addr_of_mut},
   task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
-#[cfg(feature = "std")]
 mod debug {
-  use super::{Coro, CoroK, Debug};
-  use std::fmt;
+  use super::{Coro, CoroK, Debug, YielderState, YielderStateCell};
+  use core::fmt;
 
-  impl<T, R, U, F, G> Debug for CoroK<T, R, U, F, G> {
+  impl<'s, T, R, U, F, G> Debug for CoroK<'s, T, R, U, F, G> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       match self {
         Self::Init(_, _) => write!(f, "Init(_, _)"),
-        Self::Gen(_) => write!(f, "Gen(_)"),
+        Self::Gen(_, _) => write!(f, "Gen(_)"),
         Self::Temporary => write!(f, "Temporary"),
       }
     }
   }
 
-  impl<T, R, U, F, G> Debug for Coro<T, R, U, F, G>
+  impl<'s, T, R, U, F, G> Debug for Coro<'s, T, R, U, F, G>
   where
     T: Debug,
     R: Debug,
@@ -36,6 +35,15 @@ mod debug {
         .field("y", &self.y)
         .field("_p", &self._p)
         .finish()
+    }
+  }
+
+  impl<T: Debug, R: Debug> Debug for YielderStateCell<T, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      let v = self.0.replace(YielderState::Temporary);
+      let r = f.debug_tuple("YielderStateCell").field(&v).finish();
+      self.0.set(v);
+      r
     }
   }
 }
@@ -73,34 +81,53 @@ enum YielderState<T, R> {
   Input(R),
   Output(T),
 }
-#[derive(Debug)]
-pub struct Yielder<T, R>(*mut YielderState<T, R>);
 
-impl<T, R> Yielder<T, R>
+struct YielderStateCell<T, R>(Cell<YielderState<T, R>>);
+
+impl<T, R> YielderStateCell<T, R> {
+  pub fn replace(&self, x: YielderState<T, R>) -> YielderState<T, R> {
+    self.0.replace(x)
+  }
+  pub fn set(&self, x: YielderState<T, R>) {
+    self.0.set(x);
+  }
+}
+
+impl<T, R> Default for YielderStateCell<T, R> {
+  fn default() -> Self {
+    Self(Cell::new(YielderState::default()))
+  }
+}
+
+#[derive(Debug)]
+pub struct Yielder<'s, T, R>(
+  &'s YielderStateCell<T, R>,
+  PhantomData<*mut &'s ()>,
+);
+
+impl<'s, T, R> Yielder<'s, T, R>
 where
   T: Debug,
   R: Debug,
 {
-  fn new(x: *mut YielderState<T, R>) -> Self {
-    Yielder(x)
+  fn new(x: &'s YielderStateCell<T, R>) -> Self {
+    Yielder::<'s, T, R>(x, PhantomData)
   }
   pub fn r#yield(
     &mut self,
     x: T,
-  ) -> impl Future<Output = R> + Captures<&'_ ()> {
-    dbg!(unsafe { &*self.0 });
+  ) -> impl Future<Output = R> + Captures<(&'_ (), &'s ())> {
+    dbg!(&self.0);
     let mut x = Some(x);
     core::future::poll_fn(move |_| {
-      match unsafe { ptr::replace(self.0, YielderState::Temporary) } {
+      match self.0.replace(YielderState::Temporary) {
         YielderState::Temporary => {
-          unsafe {
-            *self.0 = YielderState::Output(x.take().unwrap());
-          }
-          dbg!(unsafe { &*self.0 });
+          self.0.set(YielderState::Output(x.take().unwrap()));
+          dbg!(&self.0);
           dbg!(Poll::Pending)
         }
         YielderState::Input(r) => {
-          dbg!(unsafe { &*self.0 });
+          dbg!(&self.0);
           dbg!(Poll::Ready(r))
         }
         _ => unreachable!(),
@@ -109,27 +136,29 @@ where
   }
 }
 
-enum CoroK<T, R, U, F, G> {
-  Init(F, PhantomData<(T, R, U)>),
-  Gen(G, PhantomData<(T, R, U)>),
+enum CoroK<'s, T, R, U, F, G> {
+  Init(F, PhantomData<(*mut &'s (), T, R, U)>),
+  Gen(G, PhantomData<(*mut &'s (), T, R, U)>),
   Temporary,
 }
 
-pub struct Coro<T, R, U, F, G> {
-  g: CoroK<T, R, U, F, G>, // Needs reference to `y`.
-  y: YielderState<T, R>,
-  _p: (PhantomData<(T, R, U)>, PhantomPinned),
+pub struct Coro<'s, T, R, U, F, G> {
+  g: CoroK<'s, T, R, U, F, G>, // Needs reference to `y`.
+  y: YielderStateCell<T, R>,
+  _p: (PhantomData<(*mut &'s (), T, R, U)>, PhantomPinned),
 }
 
-impl<T, R, U, F, G> Coro<T, R, U, F, G>
+impl<'s, T, R, U, F, G> Coro<'s, T, R, U, F, G>
 where
-  F: FnOnce(Yielder<T, R>) -> G,
+  T: 's,
+  R: 's,
+  F: FnOnce(Yielder<'s, T, R>) -> G,
   G: Future<Output = U>,
 {
-  pub fn new(f: F) -> Coro<T, R, U, F, G> {
+  pub fn new(f: F) -> Coro<'s, T, R, U, F, G> {
     Coro {
       g: CoroK::Init(f, PhantomData),
-      y: YielderState::default(),
+      y: YielderStateCell::default(),
       _p: (PhantomData, PhantomPinned),
     }
   }
@@ -141,56 +170,87 @@ pub enum Output<T, U> {
   Done(U),
 }
 
-pub trait Resumable {
+pub trait Resumable<'s> {
   type StreamOutput;
   type FinalOutput;
   type Input;
 
-  fn initialize(self: &mut Pin<&mut Self>);
+  fn initialize<'m>(self: Pin<&'m mut Self>);
 
-  fn feed(self: &mut Pin<&mut Self>, x: Self::Input);
+  fn feed<'m>(self: Pin<&'m mut Self>, x: Self::Input);
 
-  fn advance(
-    self: &mut Pin<&mut Self>,
+  fn advance<'m>(
+    self: Pin<&'m mut Self>,
   ) -> Output<Self::StreamOutput, Self::FinalOutput>;
 
-  fn start(
-    self: &mut Pin<&mut Self>,
+  fn start<'m>(
+    mut self: Pin<&'m mut Self>,
   ) -> Output<Self::StreamOutput, Self::FinalOutput> {
-    self.initialize();
-    self.advance()
+    self.as_mut().initialize();
+    self.as_mut().advance()
   }
 
-  fn resume(
-    self: &mut Pin<&mut Self>,
+  fn resume<'m>(
+    mut self: Pin<&'m mut Self>,
     x: Self::Input,
   ) -> Output<Self::StreamOutput, Self::FinalOutput> {
-    self.feed(x);
-    self.advance()
+    self.as_mut().feed(x);
+    self.as_mut().advance()
   }
 }
 
-impl<T, R, U, F, G> Resumable for Coro<T, R, U, F, G>
+impl<'s, T, R, U, F, G> Resumable<'s> for Coro<'s, T, R, U, F, G>
 where
-  F: FnOnce(Yielder<T, R>) -> G,
+  F: FnOnce(Yielder<'s, T, R>) -> G,
   G: Future<Output = U>,
-  T: Debug,
-  R: Debug,
+  T: Debug + 's,
+  R: Debug + 's,
   U: Debug,
 {
   type StreamOutput = T;
   type FinalOutput = U;
   type Input = R;
 
-  fn initialize(self: &mut Pin<&mut Self>) {
-    let self_ = unsafe { self.as_mut().get_unchecked_mut() };
+  fn initialize<'m>(self: Pin<&'m mut Self>) {
+    let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
-    let y = addr_of_mut!(self_.y);
-    dbg!(unsafe { &*y });
-    assert!(matches!(unsafe { &*y }, YielderState::Temporary));
+    let y: &'m YielderStateCell<T, R> = dbg!(&self_.y);
+    match y.replace(YielderState::Temporary) {
+      YielderState::Temporary => {}
+      _ => unreachable!(),
+    }
     match mem::replace(&mut self_.g, CoroK::Temporary) {
       CoroK::Init(f, _) => {
-        let yielder = Yielder::new(y);
+        // This is the critical (and questionable) bit for the
+        // self-referential data structure to work.
+        //
+        // We have a pinned reference to `Self` with lifetime `'m`.
+        // From that, we get a reference to the state with a lifetime
+        // of `'m`.  But `Self` has a lifetime of `'s`.  We need a
+        // reference to the state with a lifetime of `'s` to be able
+        // to store it in the state.  Can we do that?
+        //
+        // We can't say `'m: 's`.  That breaks everything.  In
+        // particular, it means that we can't reborrow the pin using
+        // `as_mut`.  And calling between our methods doesn't work
+        // because we're trying to borrow for slightly too long.
+        //
+        // But the pin guarantee says that the memory behind this
+        // reference won't be freed or repurpose until drop runs for
+        // the `Self` type.
+        //
+        // Plus, of course, we *know* that this state is part of the
+        // `Self` type.
+        //
+        // The deeper question is, do we know that `'s` is exactly the
+        // lifetime of the `Self` type, or could it be longer?  No, we
+        // do not.  That's why this isn't safe.
+        //
+        // For this to be safe, we'd need to know that `'s` is
+        // *exactly* the lifetime of `Self`.
+        let y: &'s YielderStateCell<T, R> =
+          unsafe { mem::transmute(y) };
+        let yielder = Yielder::<'s, T, R>::new(y);
         self_.g = CoroK::Gen(f(yielder), PhantomData);
       }
       _ => unreachable!(),
@@ -198,39 +258,41 @@ where
     dbg!(&self_);
   }
 
-  fn feed(self: &mut Pin<&mut Self>, x: Self::Input) {
-    let self_ = unsafe { self.as_mut().get_unchecked_mut() };
+  fn feed<'m>(self: Pin<&'m mut Self>, x: Self::Input) {
+    let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
-    let y = addr_of_mut!(self_.y);
-    dbg!(unsafe { &*y });
-    assert!(matches!(unsafe { &*y }, YielderState::Temporary));
-    unsafe { *y = YielderState::Input(x) };
+    let y = dbg!(&self_.y);
+    match y.replace(YielderState::Temporary) {
+      YielderState::Temporary => {}
+      _ => unreachable!(),
+    }
+    y.set(YielderState::Input(x));
   }
 
-  fn advance(
-    self: &mut Pin<&mut Self>,
+  fn advance<'m>(
+    self: Pin<&'m mut Self>,
   ) -> Output<Self::StreamOutput, Self::FinalOutput> {
-    let self_ = unsafe { self.as_mut().get_unchecked_mut() };
+    let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
-    let y = addr_of_mut!(self_.y);
     let CoroK::Gen(ref mut g, _) = self_.g else { unreachable!() };
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
       Poll::Ready(u) => {
         dbg!(&self_);
-        dbg!(unsafe { &*y });
-        assert!(matches!(unsafe { &*y }, YielderState::Temporary));
+        let y = dbg!(&self_.y);
+        match y.replace(YielderState::Temporary) {
+          YielderState::Temporary => {}
+          _ => unreachable!(),
+        }
         dbg!(Output::Done(u))
       }
       Poll::Pending => {
         dbg!(&self_);
-        dbg!(unsafe { &*y });
-        let YielderState::Output(t) =
-          (unsafe { ptr::replace(y, YielderState::Temporary) })
-        else {
-          unreachable!()
-        };
-        dbg!(Output::Next(t))
+        let y = dbg!(&self_.y);
+        match y.replace(YielderState::Temporary) {
+          YielderState::Output(t) => dbg!(Output::Next(t)),
+          _ => unreachable!(),
+        }
       }
     }
   }
@@ -250,10 +312,10 @@ mod tests {
       dbg!(4u8)
     });
     let mut g = pin!(g);
-    assert!(matches!(g.start(), Output::Next(0u8)));
-    assert!(matches!(g.resume(11u8), Output::Next(1u8)));
-    assert!(matches!(g.resume(12u8), Output::Next(2u8)));
-    assert!(matches!(g.resume(13u8), Output::Next(3u8)));
+    assert!(matches!(g.as_mut().start(), Output::Next(0u8)));
+    assert!(matches!(g.as_mut().resume(11u8), Output::Next(1u8)));
+    assert!(matches!(g.as_mut().resume(12u8), Output::Next(2u8)));
+    assert!(matches!(g.as_mut().resume(13u8), Output::Next(3u8)));
     assert!(matches!(g.resume(14u8), Output::Done(4u8)));
   }
 
@@ -261,7 +323,7 @@ mod tests {
   fn test_no_yield() {
     let mut g =
       Coro::new(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
-    let mut g = pin!(g);
+    let g = pin!(g);
     assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
   }
 
@@ -269,12 +331,12 @@ mod tests {
   fn test_dangling_1() {
     let Output::Done(boom) = ({
       let mut g = Coro::new(|y: Yielder<(), ()>| async move { y });
-      let mut g = pin!(g);
+      let g = pin!(g);
       g.start()
     }) else {
       unreachable!()
     };
-    dbg!(unsafe { &*boom.0 }); // Pointer is dangling here.
+    dbg!(&boom.0); // Pointer is dangling here.
   }
 
   #[test]
@@ -285,10 +347,10 @@ mod tests {
         _ = boom.insert(y);
         async move {}
       });
-      let mut g = pin!(g);
+      let g = pin!(g);
       g.start();
     }
-    dbg!(unsafe { &*boom.unwrap().0 }); // Pointer is dangling here.
+    dbg!(&boom.unwrap().0); // Pointer is dangling here.
   }
 
   #[test]
@@ -298,7 +360,7 @@ mod tests {
       async move {}
     });
     let mut g = pin!(g);
-    g.start();
+    g.as_mut().start();
     dbg!(&g.y);
   }
 
@@ -308,7 +370,7 @@ mod tests {
       y.r#yield(()).await;
     });
     let mut g = pin!(g);
-    g.start();
+    g.as_mut().start();
     dbg!(&g.y);
   }
 }
