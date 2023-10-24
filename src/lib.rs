@@ -439,6 +439,35 @@ mod tests {
   }
 
   #[test]
+  fn test_next_values() {
+    use core::ops::RangeInclusive;
+    let g = pin!(Coro::new());
+    let g = |mut xs: RangeInclusive<u8>| {
+      g.init(move |mut y: Yielder<'_, _, _>| async move {
+        loop {
+          match xs.next() {
+            Some(x) if x < 254 && x % 2 == 0 => {
+              let rx;
+              (rx, xs) = y.r#yield((x, xs)).await;
+              assert!(rx % 2 == 1);
+            }
+            Some(n) if n == 254 => break n,
+            _ => unreachable!(),
+          }
+        }
+      })
+    };
+    let xs = 0u8..=255;
+    let mut g = g(xs);
+    let mut gv = g.as_mut().start();
+    while let Output::Next((gx, mut xs)) = gv {
+      assert!(gx % 2 == 0);
+      gv = g.as_mut().resume((xs.next().unwrap(), xs));
+    }
+    assert!(matches!(gv, Output::Done(254)));
+  }
+
+  #[test]
   fn test_no_yield() {
     let g = pin!(Coro::new());
     let g =
