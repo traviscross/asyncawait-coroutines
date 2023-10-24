@@ -50,6 +50,7 @@ mod debug {
 }
 
 #[cfg(not(feature = "std"))]
+#[allow(unused_macros)]
 macro_rules! dbg {
     () => {};
     ($x:expr $(,)?) => { match $x { x => x } };
@@ -68,11 +69,10 @@ const fn nop_rawwaker() -> RawWaker {
 }
 
 fn poll_once<T: Debug>(f: impl Future<Output = T>) -> Poll<T> {
-  dbg!("poll_once");
   let mut f = pin!(f);
   let waker = unsafe { Waker::from_raw(nop_rawwaker()) };
   let mut cx = Context::from_waker(&waker);
-  dbg!(f.as_mut().poll(&mut cx))
+  f.as_mut().poll(&mut cx)
 }
 
 #[derive(Debug, Default)]
@@ -118,19 +118,14 @@ where
     &mut self,
     x: T,
   ) -> impl Future<Output = R> + Captures<(&'_ (), &'s ())> {
-    dbg!(&self.0);
     let mut x = Some(x);
     core::future::poll_fn(move |_| {
       match self.0.replace(YielderState::Temporary) {
         YielderState::Temporary => {
           self.0.set(YielderState::Output(x.take().unwrap()));
-          dbg!(&self.0);
-          dbg!(Poll::Pending)
+          Poll::Pending
         }
-        YielderState::Input(r) => {
-          dbg!(&self.0);
-          dbg!(Poll::Ready(r))
-        }
+        YielderState::Input(r) => Poll::Ready(r),
         _ => unreachable!(),
       }
     })
@@ -242,8 +237,7 @@ where
   fn initialize(self: Pin<&mut Self>) {
     // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
-    dbg!(&self_);
-    let y: &'_ YielderStateCell<T, R> = dbg!(&self_.y);
+    let y: &'_ YielderStateCell<T, R> = &self_.y;
     match y.replace(YielderState::Temporary) {
       YielderState::Temporary => {}
       _ => unreachable!(),
@@ -268,14 +262,12 @@ where
       }
       _ => unreachable!(),
     };
-    dbg!(&self_);
   }
 
   fn feed(self: Pin<&mut Self>, x: Self::Input) {
     // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
-    dbg!(&self_);
-    let y = dbg!(&self_.y);
+    let y = &self_.y;
     match y.replace(YielderState::Temporary) {
       YielderState::Temporary => {}
       _ => unreachable!(),
@@ -288,7 +280,6 @@ where
   ) -> Output<Self::StreamOutput, Self::FinalOutput> {
     // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
-    dbg!(&self_);
     let CoroK::Gen(ref mut g) = self_.g else { unreachable!() };
     // SAFETY: This is a pin projection; we're treating this field as
     // structual.  This is safe because 1) our type is `!Unpin`, 2)
@@ -298,21 +289,17 @@ where
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
       Poll::Ready(u) => {
-        dbg!(&self_);
-        let y = dbg!(&self_.y);
+        let y = &self_.y;
         match y.replace(YielderState::Temporary) {
           YielderState::Temporary => {}
           _ => unreachable!(),
         }
-        dbg!(Output::Done(u))
+        Output::Done(u)
       }
       Poll::Pending => {
-        dbg!(&self_);
-        let y = dbg!(&self_.y);
+        let y = &self_.y;
         match y.replace(YielderState::Temporary) {
-          YielderState::Output(t) => {
-            dbg!(Output::Next(t))
-          }
+          YielderState::Output(t) => Output::Next(t),
           _ => unreachable!(),
         }
       }
@@ -407,7 +394,7 @@ mod tests {
         assert_eq!(!2, y.r#yield(1).await);
         assert_eq!(!3, y.r#yield(2).await);
         assert_eq!(!4, y.r#yield(3).await);
-        dbg!(4)
+        4
       });
     assert!(matches!(g.as_mut().start(), Output::Next(0)));
     assert!(matches!(g.as_mut().resume(!1), Output::Next(1)));
@@ -470,9 +457,8 @@ mod tests {
   #[test]
   fn test_no_yield() {
     let g = pin!(Coro::new());
-    let g =
-      g.init(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
-    assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
+    let g = g.init(move |_: Yielder<(), u8>| async move { 4u8 });
+    assert!(matches!(g.start(), Output::Done(4u8)));
   }
 
   #[test]
@@ -483,7 +469,7 @@ mod tests {
       async move {}
     });
     g.as_mut().start();
-    dbg!(&g.y);
+    _ = &g.y;
   }
 
   #[test]
@@ -493,6 +479,6 @@ mod tests {
       y.r#yield(()).await;
     });
     g.as_mut().start();
-    dbg!(&g.y);
+    _ = &g.y;
   }
 }
