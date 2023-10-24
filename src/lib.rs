@@ -416,6 +416,28 @@ mod tests {
   }
 
   #[test]
+  fn test_evens_odds() {
+    let g = pin!(Coro::new());
+    let g = |i| {
+      g.init(move |mut y: Yielder<'_, u8, u8>| async move {
+        for x in (i..128).map(|x| x * 2) {
+          assert_eq!(x + 1, y.r#yield(x).await);
+        }
+        u8::MAX
+      })
+    };
+    let mut g = g(0);
+    assert!(matches!(g.as_mut().start(), Output::Next(0)));
+    for x in (0..128).map(|x| x * 2 + 1) {
+      match g.as_mut().resume(x) {
+        Output::Next(v) if x < 255 && v == x + 1 => (),
+        Output::Done(u8::MAX) if x == 255 => (),
+        _ => unreachable!(),
+      }
+    }
+  }
+
+  #[test]
   fn test_no_yield() {
     let g = pin!(Coro::new());
     let g =
