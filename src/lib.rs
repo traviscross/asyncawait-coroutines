@@ -401,18 +401,19 @@ mod tests {
   #[test]
   fn test_steps() {
     let g = pin!(Coro::new());
-    let mut g = g.init(move |mut y: Yielder<'_, _, _>| async move {
-      assert_eq!(11, y.r#yield(0u8).await);
-      assert_eq!(12, y.r#yield(1u8).await);
-      assert_eq!(13, y.r#yield(2u8).await);
-      assert_eq!(14, y.r#yield(3u8).await);
-      dbg!(4u8)
-    });
-    assert!(matches!(g.as_mut().start(), Output::Next(0u8)));
-    assert!(matches!(g.as_mut().resume(11u8), Output::Next(1u8)));
-    assert!(matches!(g.as_mut().resume(12u8), Output::Next(2u8)));
-    assert!(matches!(g.as_mut().resume(13u8), Output::Next(3u8)));
-    assert!(matches!(g.resume(14u8), Output::Done(4u8)));
+    let mut g =
+      g.init(move |mut y: Yielder<'_, u8, u8>| async move {
+        assert_eq!(!1, y.r#yield(0).await);
+        assert_eq!(!2, y.r#yield(1).await);
+        assert_eq!(!3, y.r#yield(2).await);
+        assert_eq!(!4, y.r#yield(3).await);
+        dbg!(4)
+      });
+    assert!(matches!(g.as_mut().start(), Output::Next(0)));
+    assert!(matches!(g.as_mut().resume(!1), Output::Next(1)));
+    assert!(matches!(g.as_mut().resume(!2), Output::Next(2)));
+    assert!(matches!(g.as_mut().resume(!3), Output::Next(3)));
+    assert!(matches!(g.resume(!4), Output::Done(4)));
   }
 
   #[test]
