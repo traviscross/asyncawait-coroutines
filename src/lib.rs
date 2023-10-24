@@ -336,6 +336,32 @@ where
   }
 }
 
+pub trait MyIterator {
+  type Item;
+  fn next(&mut self) -> Option<Self::Item>;
+}
+
+impl<G: Generator + Unpin> MyIterator for G {
+  type Item = G::Item;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    <Self as Generator>::next(Pin::new(self))
+  }
+}
+
+impl<'s, Yield, E, G> Iterator
+  for Coro<'s, Yield, (), Result<(), E>, G>
+where
+  Coro<'s, Yield, (), Result<(), E>, G>:
+    Generator<Item = Result<Yield, E>> + Unpin,
+{
+  type Item = Result<Yield, E>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    <Self as Generator>::next(Pin::new(self))
+  }
+}
+
 /**
 ## Soundness tests
 
