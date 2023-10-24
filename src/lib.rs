@@ -5,8 +5,9 @@ use core::{
   fmt::Debug,
   future::Future,
   marker::{PhantomData, PhantomPinned},
-  mem,
+  mem::{self, MaybeUninit},
   pin::{pin, Pin},
+  ptr::addr_of_mut,
   task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
@@ -14,11 +15,11 @@ mod debug {
   use super::{Coro, CoroK, Debug, YielderState, YielderStateCell};
   use core::fmt;
 
-  impl<'s, T, R, U, F, G> Debug for CoroK<'s, T, R, U, F, G> {
+  impl<F, G> Debug for CoroK<F, G> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       match self {
-        Self::Init(_, _) => write!(f, "Init(_, _)"),
-        Self::Gen(_, _) => write!(f, "Gen(_)"),
+        Self::Init(_) => write!(f, "Init(_, _)"),
+        Self::Gen(_) => write!(f, "Gen(_)"),
         Self::Temporary => write!(f, "Temporary"),
       }
     }
@@ -136,38 +137,65 @@ where
   }
 }
 
-enum CoroK<'s, T, R, U, F, G> {
-  Init(F, PhantomData<(*mut &'s (), T, R, U)>),
-  Gen(G, PhantomData<(*mut &'s (), T, R, U)>),
+enum CoroK<F, G> {
+  Init(F),
+  Gen(G),
   Temporary,
 }
 
+pub struct CoroBuilder<'s, T, R, U, F, G>(
+  MaybeUninit<Coro<'s, T, R, U, F, G>>,
+);
+
 pub struct Coro<'s, T, R, U, F, G> {
-  g: CoroK<'s, T, R, U, F, G>, // Needs reference to `y`.
+  g: CoroK<F, G>, // Needs reference to `y`.
   y: YielderStateCell<T, R>,
   _p: (PhantomData<(*mut &'s (), T, R, U)>, PhantomPinned),
 }
 
-impl<'s, T, R, U, F, G> Coro<'s, T, R, U, F, G>
-where
-  T: 's,
-  R: 's,
-  F: FnOnce(Yielder<'s, T, R>) -> G,
-  G: Future<Output = U>,
-{
-  pub fn new(f: F) -> Coro<'s, T, R, U, F, G> {
-    Coro {
-      g: CoroK::Init(f, PhantomData),
-      y: YielderStateCell::default(),
-      _p: (PhantomData, PhantomPinned),
+impl<'s, T, R, U, F, G> CoroBuilder<'s, T, R, U, F, G> {
+  pub fn init(
+    // SAFETY: The `'s` lifetime here is critical for shortening the
+    // corresponding lifetime in the output type.  Without this, that
+    // lifetime could be too long, resulting in use-after-free.
+    self: Pin<&'s mut Self>,
+    f: F,
+  ) -> Pin<&'s mut Coro<'s, T, R, U, F, G>>
+  where
+    F: FnOnce(Yielder<'s, T, R>) -> G,
+    G: Future<Output = U>,
+    T: Debug + 's,
+    R: Debug + 's,
+    U: Debug,
+  {
+    // SAFETY: We never move the pointee or allow others to do so.
+    let dst = unsafe { &mut self.get_unchecked_mut().0 };
+    let p = dst.as_mut_ptr();
+    // SAFETY: We only write to maybe-uninitialized fields, and we
+    // take care to not drop old maybe-uninitialized values.
+    unsafe {
+      addr_of_mut!((*p).g).write(CoroK::Init(f));
+      addr_of_mut!((*p).y).write(YielderStateCell::default());
+      addr_of_mut!((*p)._p).write((PhantomData, PhantomPinned));
     }
+    // SAFETY: We have initialiized all fields.
+    let dst = unsafe { dst.assume_init_mut() };
+    // SAFETY: The pointee is pinned because we received a pinned
+    // reference to it.
+    unsafe { Pin::new_unchecked(dst) }
+  }
+}
+
+impl<'s, T, R, U, F, G> Coro<'s, T, R, U, F, G> {
+  pub fn new() -> CoroBuilder<'s, T, R, U, F, G> {
+    CoroBuilder(MaybeUninit::uninit())
   }
 }
 
 #[derive(Debug)]
-pub enum Output<'s, T, U> {
-  Next(T, PhantomData<*mut &'s ()>),
-  Done(U, PhantomData<*mut &'s ()>),
+pub enum Output<T, U> {
+  Next(T),
+  Done(U),
 }
 
 pub trait Resumable {
@@ -181,11 +209,11 @@ pub trait Resumable {
 
   fn advance(
     self: Pin<&mut Self>,
-  ) -> Output<'_, Self::StreamOutput, Self::FinalOutput>;
+  ) -> Output<Self::StreamOutput, Self::FinalOutput>;
 
   fn start(
     mut self: Pin<&mut Self>,
-  ) -> Output<'_, Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
     self.as_mut().initialize();
     self.advance()
   }
@@ -193,7 +221,7 @@ pub trait Resumable {
   fn resume(
     mut self: Pin<&mut Self>,
     x: Self::Input,
-  ) -> Output<'_, Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
     self.as_mut().feed(x);
     self.advance()
   }
@@ -206,13 +234,13 @@ where
   T: Debug + 's,
   R: Debug + 's,
   U: Debug,
-  Self: 's,
 {
   type StreamOutput = T;
   type FinalOutput = U;
   type Input = R;
 
   fn initialize(self: Pin<&mut Self>) {
+    // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
     let y: &'_ YielderStateCell<T, R> = dbg!(&self_.y);
@@ -221,11 +249,22 @@ where
       _ => unreachable!(),
     }
     match mem::replace(&mut self_.g, CoroK::Temporary) {
-      CoroK::Init(f, _) => {
+      CoroK::Init(f) => {
+        // SAFETY: We initialized `Coro<'s, ..>` such that `'s` is
+        // equal to the lifetime of some pinned mutable reference to
+        // `Self`, so we know that `Self: 's`.  Since `Self` is
+        // pinned, we know that it won't move out from under us for at
+        // least this long.
+        //
+        // The remaining thing we have to worry about is the
+        // possibility that a mutable reference has been handed out to
+        // this data and that we'd be aliasing it.  Since we don't
+        // hand out any mutable references to this field, that's not
+        // possible, so this is OK.
         let y: &'s YielderStateCell<T, R> =
           unsafe { mem::transmute(y) };
         let yielder = Yielder::<'s, T, R>::new(y);
-        self_.g = CoroK::Gen(f(yielder), PhantomData);
+        self_.g = CoroK::Gen(f(yielder));
       }
       _ => unreachable!(),
     };
@@ -233,6 +272,7 @@ where
   }
 
   fn feed(self: Pin<&mut Self>, x: Self::Input) {
+    // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
     let y = dbg!(&self_.y);
@@ -245,10 +285,16 @@ where
 
   fn advance(
     self: Pin<&mut Self>,
-  ) -> Output<'_, Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+    // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
     dbg!(&self_);
-    let CoroK::Gen(ref mut g, _) = self_.g else { unreachable!() };
+    let CoroK::Gen(ref mut g) = self_.g else { unreachable!() };
+    // SAFETY: This is a pin projection; we're treating this field as
+    // structual.  This is safe because 1) our type is `!Unpin`, 2)
+    // `drop` does not move out of this field, 3) we uphold the `Drop`
+    // guarantee, 4) we don't move out of the field or allow others to
+    // do so.
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
       Poll::Ready(u) => {
@@ -258,14 +304,14 @@ where
           YielderState::Temporary => {}
           _ => unreachable!(),
         }
-        dbg!(Output::Done(u, PhantomData))
+        dbg!(Output::Done(u))
       }
       Poll::Pending => {
         dbg!(&self_);
         let y = dbg!(&self_.y);
         match y.replace(YielderState::Temporary) {
           YielderState::Output(t) => {
-            dbg!(Output::Next(t, PhantomData))
+            dbg!(Output::Next(t))
           }
           _ => unreachable!(),
         }
@@ -280,35 +326,35 @@ mod tests {
 
   #[test]
   fn test_steps() {
-    let mut g = Coro::new(move |mut y| async move {
+    let g = pin!(Coro::new());
+    let mut g = g.init(move |mut y: Yielder<'_, _, _>| async move {
       assert_eq!(11, y.r#yield(0u8).await);
       assert_eq!(12, y.r#yield(1u8).await);
       assert_eq!(13, y.r#yield(2u8).await);
       assert_eq!(14, y.r#yield(3u8).await);
       dbg!(4u8)
     });
-    let mut g = pin!(g);
-    assert!(matches!(g.as_mut().start(), Output::Next(0u8, _)));
-    assert!(matches!(g.as_mut().resume(11u8), Output::Next(1u8, _)));
-    assert!(matches!(g.as_mut().resume(12u8), Output::Next(2u8, _)));
-    assert!(matches!(g.as_mut().resume(13u8), Output::Next(3u8, _)));
-    assert!(matches!(g.resume(14u8), Output::Done(4u8, _)));
+    assert!(matches!(g.as_mut().start(), Output::Next(0u8)));
+    assert!(matches!(g.as_mut().resume(11u8), Output::Next(1u8)));
+    assert!(matches!(g.as_mut().resume(12u8), Output::Next(2u8)));
+    assert!(matches!(g.as_mut().resume(13u8), Output::Next(3u8)));
+    assert!(matches!(g.resume(14u8), Output::Done(4u8)));
   }
 
   #[test]
   fn test_no_yield() {
-    let mut g =
-      Coro::new(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
-    let g = pin!(g);
-    assert!(matches!(dbg!(g.start()), Output::Done(4u8, _)));
+    let g = pin!(Coro::new());
+    let g =
+      g.init(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
+    assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
   }
 
   #[cfg(False)]
   #[test]
   fn test_dangling_1() {
-    let Output::Done(boom, _) = ({
-      let mut g = Coro::new(|y: Yielder<(), ()>| async move { y });
-      let g = pin!(g);
+    let Output::Done(boom) = ({
+      let g = pin!(Coro::new());
+      let g = g.init(|y: Yielder<(), ()>| async move { y });
       g.start()
     }) else {
       unreachable!()
@@ -318,36 +364,66 @@ mod tests {
 
   #[cfg(False)]
   #[test]
+  fn test_use_after_pin_1() {
+    let g = Coro::new();
+    let Output::Done(boom) = ({
+      let g = pin!(g);
+      let g = g.init(|y: Yielder<(), ()>| async move { y });
+      g.start()
+    }) else {
+      unreachable!()
+    };
+    dbg!(&boom.0); // OK?
+  }
+
+  #[cfg(False)]
+  #[test]
   fn test_dangling_2() {
     let mut boom = None;
     {
-      let mut g = Coro::new(|y: Yielder<(), ()>| {
+      let g = pin!(Coro::new());
+      let g = g.init(|y: Yielder<(), ()>| {
         _ = boom.insert(y);
         async move {}
       });
-      let g = pin!(g);
       g.start();
     }
-    dbg!(&boom.unwrap().0); // Pointer is dangling here.
+    dbg!(&boom.as_ref().unwrap().0); // Pointer is dangling here.
+  }
+
+  #[cfg(False)]
+  #[test]
+  fn test_use_after_pin_2() {
+    let g = Coro::new();
+    let mut boom = None;
+    {
+      let g = pin!(g);
+      let g = g.init(|y: Yielder<(), ()>| {
+        _ = boom.insert(y);
+        async move {}
+      });
+      g.start();
+    }
+    dbg!(&boom.as_ref().unwrap().0); // Pointer is dangling here.
   }
 
   #[test]
   fn test_drop_1() {
-    let mut g = Coro::new(|y: Yielder<(), ()>| {
+    let g = pin!(Coro::new());
+    let mut g = g.init(|y: Yielder<(), ()>| {
       drop(y);
       async move {}
     });
-    let mut g = pin!(g);
     g.as_mut().start();
     dbg!(&g.y);
   }
 
   #[test]
   fn test_drop_2() {
-    let mut g = Coro::new(|mut y: Yielder<(), ()>| async move {
+    let g = pin!(Coro::new());
+    let mut g = g.init(move |mut y: Yielder<(), ()>| async move {
       y.r#yield(()).await;
     });
-    let mut g = pin!(g);
     g.as_mut().start();
     dbg!(&g.y);
   }
