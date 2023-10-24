@@ -59,6 +59,7 @@ const fn nop_rawwaker() -> RawWaker {
 
 fn poll_once<T>(f: impl Future<Output = T>) -> Poll<T> {
   let mut f = pin!(f);
+  // SAFETY: Our raw waker does nothing.
   let waker = unsafe { Waker::from_raw(nop_rawwaker()) };
   let mut cx = Context::from_waker(&waker);
   f.as_mut().poll(&mut cx)
