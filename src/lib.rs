@@ -320,6 +320,80 @@ where
   }
 }
 
+/**
+## Soundness tests
+
+These examples must never compile as they would exhibit undefined
+behavior and use-after-free.
+
+```compile_fail,E0716
+use coroutines_demo::*;
+use core::pin::pin;
+let Output::Done(mut boom) = ({
+  let g = pin!(Coro::new());
+  let g = g.init(|y: Yielder<(), ()>| async move { y });
+  g.start()
+}) else {
+  unreachable!()
+};
+boom.r#yield(()); // Pointer is dangling here.
+```
+
+```compile_fail,E0499,E0716
+use coroutines_demo::*;
+use core::pin::pin;
+let mut boom = None;
+{
+  let g = pin!(Coro::new());
+  let g = g.init(|y: Yielder<(), ()>| {
+    _ = boom.insert(y);
+    async move {}
+  });
+  g.start();
+}
+boom.as_mut().unwrap().r#yield(()); // Pointer is dangling here.
+```
+
+## Correctness tests
+
+These examples would not be undefined behavior if they were to
+compile.  But it would be a bit strange if they did, and we don't
+expect them to given our implementation.
+
+```compile_fail,E0716
+use coroutines_demo::*;
+use core::pin::pin;
+let g = Coro::new();
+let Output::Done(mut boom) = ({
+  let g = pin!(g);
+  let g = g.init(|y: Yielder<(), ()>| async move { y });
+  g.start()
+}) else {
+  unreachable!()
+};
+boom.r#yield(()); // OK?
+```
+
+```compile_fail,E0499,E0716
+use coroutines_demo::*;
+use core::pin::pin;
+let g = Coro::new();
+let mut boom = None;
+{
+  let g = pin!(g);
+  let g = g.init(|y: Yielder<(), ()>| {
+    _ = boom.insert(y);
+    async move {}
+  });
+  g.start();
+}
+boom.as_mut().unwrap().r#yield(()); // OK?
+```
+*/
+#[allow(dead_code)]
+#[doc(hidden)]
+fn test_compile_fail() {}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -347,64 +421,6 @@ mod tests {
     let g =
       g.init(move |_: Yielder<(), u8>| async move { dbg!(4u8) });
     assert!(matches!(dbg!(g.start()), Output::Done(4u8)));
-  }
-
-  #[cfg(False)]
-  #[test]
-  fn test_dangling_1() {
-    let Output::Done(boom) = ({
-      let g = pin!(Coro::new());
-      let g = g.init(|y: Yielder<(), ()>| async move { y });
-      g.start()
-    }) else {
-      unreachable!()
-    };
-    dbg!(&boom.0); // Pointer is dangling here.
-  }
-
-  #[cfg(False)]
-  #[test]
-  fn test_use_after_pin_1() {
-    let g = Coro::new();
-    let Output::Done(boom) = ({
-      let g = pin!(g);
-      let g = g.init(|y: Yielder<(), ()>| async move { y });
-      g.start()
-    }) else {
-      unreachable!()
-    };
-    dbg!(&boom.0); // OK?
-  }
-
-  #[cfg(False)]
-  #[test]
-  fn test_dangling_2() {
-    let mut boom = None;
-    {
-      let g = pin!(Coro::new());
-      let g = g.init(|y: Yielder<(), ()>| {
-        _ = boom.insert(y);
-        async move {}
-      });
-      g.start();
-    }
-    dbg!(&boom.as_ref().unwrap().0); // Pointer is dangling here.
-  }
-
-  #[cfg(False)]
-  #[test]
-  fn test_use_after_pin_2() {
-    let g = Coro::new();
-    let mut boom = None;
-    {
-      let g = pin!(g);
-      let g = g.init(|y: Yielder<(), ()>| {
-        _ = boom.insert(y);
-        async move {}
-      });
-      g.start();
-    }
-    dbg!(&boom.as_ref().unwrap().0); // Pointer is dangling here.
   }
 
   #[test]
