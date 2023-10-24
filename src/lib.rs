@@ -22,7 +22,7 @@ mod debug {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       f.debug_struct("Coro")
         .field("state", &self.state)
-        .field("is_started", &self.is_started)
+        .field("run_state", &self.run_state)
         .field("_phantom", &self._phantom)
         .finish()
     }
@@ -144,10 +144,17 @@ pub struct CoroBuilder<'s, Yield, Resume, Return, G>(
   MaybeUninit<Coro<'s, Yield, Resume, Return, G>>,
 );
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunState {
+  NotStarted,
+  Started,
+  Done,
+}
+
 pub struct Coro<'s, Yield, Resume, Return, G> {
   future: G, // May hold self-reference to `state`.
   state: YielderStateCell<Yield, Resume>,
-  is_started: bool,
+  run_state: RunState,
   _phantom: (
     PhantomData<(*mut &'s (), Yield, Resume, Return)>,
     PhantomPinned,
@@ -185,7 +192,7 @@ impl<'s, Yield: 's, Resume: 's, Return, G>
         }
       };
       addr_of_mut!((*p).future).write(g);
-      addr_of_mut!((*p).is_started).write(false);
+      addr_of_mut!((*p).run_state).write(RunState::NotStarted);
       addr_of_mut!((*p)._phantom).write((PhantomData, PhantomPinned));
     }
     // SAFETY: We have initialiized all fields.
@@ -216,6 +223,7 @@ pub trait Resumable {
   type Resume;
 
   fn is_started(&self) -> bool;
+  fn is_done(&self) -> bool;
 
   fn feed(self: Pin<&mut Self>, x: Self::Resume);
 
@@ -250,7 +258,11 @@ where
   type Resume = Resume;
 
   fn is_started(&self) -> bool {
-    self.is_started
+    matches!(self.run_state, RunState::Started)
+  }
+
+  fn is_done(&self) -> bool {
+    matches!(self.run_state, RunState::Done)
   }
 
   fn feed(self: Pin<&mut Self>, x: Self::Resume) {
@@ -270,7 +282,7 @@ where
   ) -> Output<Self::Yield, Self::Return> {
     // SAFETY: We never move the pointee or allow others to do so.
     let this = unsafe { self.get_unchecked_mut() };
-    this.is_started = true;
+    this.run_state = RunState::Started;
     let ref mut g = this.future;
     // SAFETY: This is a pin projection; we're treating this field as
     // structual.  This is safe because 1) our type is `!Unpin`, 2)
@@ -285,6 +297,7 @@ where
           YielderState::Temporary => {}
           _ => unreachable!(),
         }
+        this.run_state = RunState::Done;
         Output::Done(x)
       }
       Poll::Pending => {
