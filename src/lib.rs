@@ -222,8 +222,8 @@ where
 
   fn feed(self: Pin<&mut Self>, x: Self::Resume) {
     // SAFETY: We never move the pointee or allow others to do so.
-    let self_ = unsafe { self.get_unchecked_mut() };
-    let state = &self_.state;
+    let this = unsafe { self.get_unchecked_mut() };
+    let state = &this.state;
     match state.replace(YielderState::Temporary) {
       YielderState::Temporary => {}
       _ => unreachable!(),
@@ -235,8 +235,8 @@ where
     self: Pin<&mut Self>,
   ) -> Output<Self::Yield, Self::Return> {
     // SAFETY: We never move the pointee or allow others to do so.
-    let self_ = unsafe { self.get_unchecked_mut() };
-    let ref mut g = self_.future;
+    let this = unsafe { self.get_unchecked_mut() };
+    let ref mut g = this.future;
     // SAFETY: This is a pin projection; we're treating this field as
     // structual.  This is safe because 1) our type is `!Unpin`, 2)
     // `drop` does not move out of this field, 3) we uphold the `Drop`
@@ -245,7 +245,7 @@ where
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
       Poll::Ready(x) => {
-        let state = &self_.state;
+        let state = &this.state;
         match state.replace(YielderState::Temporary) {
           YielderState::Temporary => {}
           _ => unreachable!(),
@@ -253,7 +253,7 @@ where
         Output::Done(x)
       }
       Poll::Pending => {
-        let state = &self_.state;
+        let state = &this.state;
         match state.replace(YielderState::Temporary) {
           YielderState::Output(x) => Output::Next(x),
           _ => unreachable!(),
