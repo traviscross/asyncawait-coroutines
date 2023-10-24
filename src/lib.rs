@@ -174,26 +174,26 @@ pub enum Output<T, U> {
 }
 
 pub trait Resumable {
-  type StreamOutput;
-  type FinalOutput;
-  type Input;
+  type Yield;
+  type Return;
+  type Resume;
 
-  fn feed(self: Pin<&mut Self>, x: Self::Input);
+  fn feed(self: Pin<&mut Self>, x: Self::Resume);
 
   fn advance(
     self: Pin<&mut Self>,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput>;
+  ) -> Output<Self::Yield, Self::Return>;
 
   fn start(
     self: Pin<&mut Self>,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<Self::Yield, Self::Return> {
     self.advance()
   }
 
   fn resume(
     mut self: Pin<&mut Self>,
-    x: Self::Input,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+    x: Self::Resume,
+  ) -> Output<Self::Yield, Self::Return> {
     self.as_mut().feed(x);
     self.advance()
   }
@@ -203,11 +203,11 @@ impl<'s, T: 's, R: 's, U, G> Resumable for Coro<'s, T, R, U, G>
 where
   G: Future<Output = U>,
 {
-  type StreamOutput = T;
-  type FinalOutput = U;
-  type Input = R;
+  type Yield = T;
+  type Return = U;
+  type Resume = R;
 
-  fn feed(self: Pin<&mut Self>, x: Self::Input) {
+  fn feed(self: Pin<&mut Self>, x: Self::Resume) {
     // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
     let y = &self_.y;
@@ -220,7 +220,7 @@ where
 
   fn advance(
     self: Pin<&mut Self>,
-  ) -> Output<Self::StreamOutput, Self::FinalOutput> {
+  ) -> Output<Self::Yield, Self::Return> {
     // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
     let ref mut g = self_.g;
