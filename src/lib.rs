@@ -20,8 +20,8 @@ mod debug {
   {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       f.debug_struct("Coro")
-        .field("y", &self.y)
-        .field("_p", &self._p)
+        .field("state", &self.state)
+        .field("_phantom", &self._phantom)
         .finish()
     }
   }
@@ -128,9 +128,9 @@ pub struct CoroBuilder<'s, Yield, Resume, Return, G>(
 );
 
 pub struct Coro<'s, Yield, Resume, Return, G> {
-  g: G, // Needs reference to `y`.
-  y: YielderStateCell<Yield, Resume>,
-  _p: (
+  future: G, // May hold self-reference to `state`.
+  state: YielderStateCell<Yield, Resume>,
+  _phantom: (
     PhantomData<(*mut &'s (), Yield, Resume, Return)>,
     PhantomPinned,
   ),
@@ -156,12 +156,12 @@ impl<'s, Yield: 's, Resume: 's, Return, G>
     // SAFETY: We only write to maybe-uninitialized fields, and we
     // take care to not drop old maybe-uninitialized values.
     unsafe {
-      addr_of_mut!((*p)._p).write((PhantomData, PhantomPinned));
-      addr_of_mut!((*p).y).write(YielderStateCell::default());
-      let y: &'s YielderStateCell<Yield, Resume> = &(*p).y;
-      let yielder = Yielder::<'s, Yield, Resume>::new(y);
+      addr_of_mut!((*p)._phantom).write((PhantomData, PhantomPinned));
+      addr_of_mut!((*p).state).write(YielderStateCell::default());
+      let state: &'s YielderStateCell<Yield, Resume> = &(*p).state;
+      let yielder = Yielder::<'s, Yield, Resume>::new(state);
       let g = f(yielder);
-      addr_of_mut!((*p).g).write(g);
+      addr_of_mut!((*p).future).write(g);
     }
     // SAFETY: We have initialiized all fields.
     let dst = unsafe { dst.assume_init_mut() };
@@ -223,12 +223,12 @@ where
   fn feed(self: Pin<&mut Self>, x: Self::Resume) {
     // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
-    let y = &self_.y;
-    match y.replace(YielderState::Temporary) {
+    let state = &self_.state;
+    match state.replace(YielderState::Temporary) {
       YielderState::Temporary => {}
       _ => unreachable!(),
     }
-    y.set(YielderState::Input(x));
+    state.set(YielderState::Input(x));
   }
 
   fn advance(
@@ -236,7 +236,7 @@ where
   ) -> Output<Self::Yield, Self::Return> {
     // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
-    let ref mut g = self_.g;
+    let ref mut g = self_.future;
     // SAFETY: This is a pin projection; we're treating this field as
     // structual.  This is safe because 1) our type is `!Unpin`, 2)
     // `drop` does not move out of this field, 3) we uphold the `Drop`
@@ -245,16 +245,16 @@ where
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
       Poll::Ready(u) => {
-        let y = &self_.y;
-        match y.replace(YielderState::Temporary) {
+        let state = &self_.state;
+        match state.replace(YielderState::Temporary) {
           YielderState::Temporary => {}
           _ => unreachable!(),
         }
         Output::Done(u)
       }
       Poll::Pending => {
-        let y = &self_.y;
-        match y.replace(YielderState::Temporary) {
+        let state = &self_.state;
+        match state.replace(YielderState::Temporary) {
           YielderState::Output(t) => Output::Next(t),
           _ => unreachable!(),
         }
@@ -425,7 +425,7 @@ mod tests {
       async move {}
     });
     g.as_mut().start();
-    _ = &g.y;
+    _ = &g.state;
   }
 
   #[test]
@@ -435,6 +435,6 @@ mod tests {
       y.r#yield(()).await;
     });
     g.as_mut().start();
-    _ = &g.y;
+    _ = &g.state;
   }
 }
