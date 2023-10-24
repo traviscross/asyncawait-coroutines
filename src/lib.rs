@@ -244,18 +244,18 @@ where
     // do so.
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
-      Poll::Ready(u) => {
+      Poll::Ready(x) => {
         let state = &self_.state;
         match state.replace(YielderState::Temporary) {
           YielderState::Temporary => {}
           _ => unreachable!(),
         }
-        Output::Done(u)
+        Output::Done(x)
       }
       Poll::Pending => {
         let state = &self_.state;
         match state.replace(YielderState::Temporary) {
-          YielderState::Output(t) => Output::Next(t),
+          YielderState::Output(x) => Output::Next(x),
           _ => unreachable!(),
         }
       }
