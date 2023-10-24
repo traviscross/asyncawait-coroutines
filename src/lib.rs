@@ -6,8 +6,9 @@ use core::{
   future::Future,
   marker::{PhantomData, PhantomPinned},
   mem::MaybeUninit,
+  panic::AssertUnwindSafe,
   pin::{pin, Pin},
-  ptr::addr_of_mut,
+  ptr::{addr_of_mut, drop_in_place},
   task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
@@ -44,6 +45,21 @@ macro_rules! dbg {
     () => {};
     ($x:expr $(,)?) => { match $x { x => x } };
     ($($x:expr),+ $(,)?) => { ($($crate::dbg!($x)),+,) };
+}
+
+#[cfg(feature = "std")]
+use std::panic::{catch_unwind, resume_unwind};
+
+#[cfg(not(feature = "std"))]
+fn catch_unwind<F: FnOnce() -> R + core::panic::UnwindSafe, R>(
+  f: F,
+) -> Result<R, core::convert::Infallible> {
+  Ok(f())
+}
+
+#[cfg(not(feature = "std"))]
+fn resume_unwind(_: core::convert::Infallible) -> ! {
+  loop {}
 }
 
 #[doc(hidden)]
@@ -156,12 +172,18 @@ impl<'s, Yield: 's, Resume: 's, Return, G>
     // SAFETY: We only write to maybe-uninitialized fields, and we
     // take care to not drop old maybe-uninitialized values.
     unsafe {
-      addr_of_mut!((*p)._phantom).write((PhantomData, PhantomPinned));
       addr_of_mut!((*p).state).write(YielderStateCell::default());
       let state: &'s YielderStateCell<Yield, Resume> = &(*p).state;
       let yielder = Yielder::<'s, Yield, Resume>::new(state);
-      let g = f(yielder);
+      let g = match catch_unwind(AssertUnwindSafe(|| f(yielder))) {
+        Ok(x) => x,
+        Err(e) => {
+          drop_in_place(addr_of_mut!((*p).state));
+          resume_unwind(e)
+        }
+      };
       addr_of_mut!((*p).future).write(g);
+      addr_of_mut!((*p)._phantom).write((PhantomData, PhantomPinned));
     }
     // SAFETY: We have initialiized all fields.
     let dst = unsafe { dst.assume_init_mut() };
