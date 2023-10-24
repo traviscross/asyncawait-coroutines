@@ -311,6 +311,31 @@ where
   }
 }
 
+pub trait Generator {
+  type Item;
+  fn next(self: Pin<&mut Self>) -> Option<Self::Item>;
+}
+
+impl<Yield, E, R> Generator for R
+where
+  R: Resumable<Yield = Yield, Resume = (), Return = Result<(), E>>,
+{
+  type Item = Result<Yield, E>;
+
+  fn next(self: Pin<&mut Self>) -> Option<Self::Item> {
+    let v = match () {
+      _ if self.is_done() => return None,
+      _ if !self.is_started() => self.start(),
+      _ => self.resume(()),
+    };
+    match v {
+      Output::Next(x) => Some(Ok(x)),
+      Output::Done(Ok(())) => None,
+      Output::Done(Err(e)) => Some(Err(e)),
+    }
+  }
+}
+
 /**
 ## Soundness tests
 
@@ -484,5 +509,36 @@ mod tests {
     });
     g.as_mut().start();
     _ = &g.state;
+  }
+
+  #[test]
+  fn test_generator_1() {
+    let g = pin!(Coro::new());
+    let mut g = g.init(move |mut y: Yielder<u8, ()>| async move {
+      y.r#yield(1).await;
+      y.r#yield(2).await;
+      y.r#yield(3).await;
+      Ok::<_, ()>(())
+    });
+    assert_eq!(Some(Ok(1)), g.as_mut().next());
+    assert_eq!(Some(Ok(2)), g.as_mut().next());
+    assert_eq!(Some(Ok(3)), g.as_mut().next());
+    assert_eq!(None, g.as_mut().next());
+  }
+
+  #[test]
+  fn test_generator_2() {
+    let g = pin!(Coro::new());
+    let mut g = g.init(move |mut y: Yielder<u8, ()>| async move {
+      y.r#yield(1).await;
+      y.r#yield(2).await;
+      Err(())?;
+      y.r#yield(3).await;
+      Ok::<_, ()>(())
+    });
+    assert_eq!(Some(Ok(1)), g.as_mut().next());
+    assert_eq!(Some(Ok(2)), g.as_mut().next());
+    assert_eq!(Some(Err(())), g.as_mut().next());
+    assert_eq!(None, g.as_mut().next());
   }
 }
