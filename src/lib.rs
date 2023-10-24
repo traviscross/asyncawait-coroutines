@@ -22,6 +22,7 @@ mod debug {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       f.debug_struct("Coro")
         .field("state", &self.state)
+        .field("is_started", &self.is_started)
         .field("_phantom", &self._phantom)
         .finish()
     }
@@ -146,6 +147,7 @@ pub struct CoroBuilder<'s, Yield, Resume, Return, G>(
 pub struct Coro<'s, Yield, Resume, Return, G> {
   future: G, // May hold self-reference to `state`.
   state: YielderStateCell<Yield, Resume>,
+  is_started: bool,
   _phantom: (
     PhantomData<(*mut &'s (), Yield, Resume, Return)>,
     PhantomPinned,
@@ -183,6 +185,7 @@ impl<'s, Yield: 's, Resume: 's, Return, G>
         }
       };
       addr_of_mut!((*p).future).write(g);
+      addr_of_mut!((*p).is_started).write(false);
       addr_of_mut!((*p)._phantom).write((PhantomData, PhantomPinned));
     }
     // SAFETY: We have initialiized all fields.
@@ -212,6 +215,8 @@ pub trait Resumable {
   type Return;
   type Resume;
 
+  fn is_started(&self) -> bool;
+
   fn feed(self: Pin<&mut Self>, x: Self::Resume);
 
   fn advance(
@@ -221,6 +226,7 @@ pub trait Resumable {
   fn start(
     self: Pin<&mut Self>,
   ) -> Output<Self::Yield, Self::Return> {
+    assert!(!self.is_started());
     self.advance()
   }
 
@@ -228,6 +234,7 @@ pub trait Resumable {
     mut self: Pin<&mut Self>,
     x: Self::Resume,
   ) -> Output<Self::Yield, Self::Return> {
+    assert!(self.is_started());
     self.as_mut().feed(x);
     self.advance()
   }
@@ -242,9 +249,14 @@ where
   type Return = Return;
   type Resume = Resume;
 
+  fn is_started(&self) -> bool {
+    self.is_started
+  }
+
   fn feed(self: Pin<&mut Self>, x: Self::Resume) {
     // SAFETY: We never move the pointee or allow others to do so.
     let this = unsafe { self.get_unchecked_mut() };
+    assert!(this.is_started());
     let state = &this.state;
     match state.replace(YielderState::Temporary) {
       YielderState::Temporary => {}
@@ -258,6 +270,7 @@ where
   ) -> Output<Self::Yield, Self::Return> {
     // SAFETY: We never move the pointee or allow others to do so.
     let this = unsafe { self.get_unchecked_mut() };
+    this.is_started = true;
     let ref mut g = this.future;
     // SAFETY: This is a pin projection; we're treating this field as
     // structual.  This is safe because 1) our type is `!Unpin`, 2)
