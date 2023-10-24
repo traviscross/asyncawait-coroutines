@@ -15,10 +15,8 @@ mod debug {
   use super::{Coro, Debug, YielderState, YielderStateCell};
   use core::fmt;
 
-  impl<'s, T, R, U, G> Debug for Coro<'s, T, R, U, G>
-  where
-    T: Debug,
-    R: Debug,
+  impl<'s, Yield: Debug, Resume: Debug, Return, G> Debug
+    for Coro<'s, Yield, Resume, Return, G>
   {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       f.debug_struct("Coro")
@@ -28,7 +26,9 @@ mod debug {
     }
   }
 
-  impl<T: Debug, R: Debug> Debug for YielderStateCell<T, R> {
+  impl<Yield: Debug, Resume: Debug> Debug
+    for YielderStateCell<Yield, Resume>
+  {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       let v = self.0.replace(YielderState::Temporary);
       let r = f.debug_tuple("YielderStateCell").field(&v).finish();
@@ -66,44 +66,49 @@ fn poll_once<T>(f: impl Future<Output = T>) -> Poll<T> {
 }
 
 #[derive(Debug, Default)]
-enum YielderState<T, R> {
+enum YielderState<Yield, Resume> {
   #[default]
   Temporary,
-  Input(R),
-  Output(T),
+  Input(Resume),
+  Output(Yield),
 }
 
-struct YielderStateCell<T, R>(Cell<YielderState<T, R>>);
+struct YielderStateCell<Yield, Resume>(
+  Cell<YielderState<Yield, Resume>>,
+);
 
-impl<T, R> YielderStateCell<T, R> {
-  pub fn replace(&self, x: YielderState<T, R>) -> YielderState<T, R> {
+impl<Yield, Resume> YielderStateCell<Yield, Resume> {
+  pub fn replace(
+    &self,
+    x: YielderState<Yield, Resume>,
+  ) -> YielderState<Yield, Resume> {
     self.0.replace(x)
   }
-  pub fn set(&self, x: YielderState<T, R>) {
+  pub fn set(&self, x: YielderState<Yield, Resume>) {
     self.0.set(x);
   }
 }
 
-impl<T, R> Default for YielderStateCell<T, R> {
+impl<Yield, Resume> Default for YielderStateCell<Yield, Resume> {
   fn default() -> Self {
     Self(Cell::new(YielderState::default()))
   }
 }
 
 #[derive(Debug)]
-pub struct Yielder<'s, T, R>(
-  &'s YielderStateCell<T, R>,
+pub struct Yielder<'s, Yield, Resume>(
+  &'s YielderStateCell<Yield, Resume>,
   PhantomData<*mut &'s ()>,
 );
 
-impl<'s, T, R> Yielder<'s, T, R> {
-  fn new(x: &'s YielderStateCell<T, R>) -> Self {
-    Yielder::<'s, T, R>(x, PhantomData)
+impl<'s, Yield, Resume> Yielder<'s, Yield, Resume> {
+  fn new(x: &'s YielderStateCell<Yield, Resume>) -> Self {
+    Yielder::<'s, Yield, Resume>(x, PhantomData)
   }
   pub fn r#yield(
     &mut self,
-    x: T,
-  ) -> impl Future<Output = R> + Captures<(&'_ (), &'s ())> {
+    x: Yield,
+  ) -> impl Future<Output = Resume> + Captures<(&'_ (), &'s ())> {
     let mut x = Some(x);
     core::future::poll_fn(move |_| {
       match self.0.replace(YielderState::Temporary) {
@@ -118,27 +123,32 @@ impl<'s, T, R> Yielder<'s, T, R> {
   }
 }
 
-pub struct CoroBuilder<'s, T, R, U, G>(
-  MaybeUninit<Coro<'s, T, R, U, G>>,
+pub struct CoroBuilder<'s, Yield, Resume, Return, G>(
+  MaybeUninit<Coro<'s, Yield, Resume, Return, G>>,
 );
 
-pub struct Coro<'s, T, R, U, G> {
+pub struct Coro<'s, Yield, Resume, Return, G> {
   g: G, // Needs reference to `y`.
-  y: YielderStateCell<T, R>,
-  _p: (PhantomData<(*mut &'s (), T, R, U)>, PhantomPinned),
+  y: YielderStateCell<Yield, Resume>,
+  _p: (
+    PhantomData<(*mut &'s (), Yield, Resume, Return)>,
+    PhantomPinned,
+  ),
 }
 
-impl<'s, T: 's, R: 's, U, G> CoroBuilder<'s, T, R, U, G> {
+impl<'s, Yield: 's, Resume: 's, Return, G>
+  CoroBuilder<'s, Yield, Resume, Return, G>
+{
   pub fn init<F>(
     // SAFETY: The `'s` lifetime here is critical for shortening the
     // corresponding lifetime in the output type.  Without this, that
     // lifetime could be too long, resulting in use-after-free.
     self: Pin<&'s mut Self>,
     f: F,
-  ) -> Pin<&'s mut Coro<'s, T, R, U, G>>
+  ) -> Pin<&'s mut Coro<'s, Yield, Resume, Return, G>>
   where
-    F: FnOnce(Yielder<'s, T, R>) -> G,
-    G: Future<Output = U>,
+    F: FnOnce(Yielder<'s, Yield, Resume>) -> G,
+    G: Future<Output = Return>,
   {
     // SAFETY: We never move the pointee or allow others to do so.
     let dst = unsafe { &mut self.get_unchecked_mut().0 };
@@ -148,8 +158,8 @@ impl<'s, T: 's, R: 's, U, G> CoroBuilder<'s, T, R, U, G> {
     unsafe {
       addr_of_mut!((*p)._p).write((PhantomData, PhantomPinned));
       addr_of_mut!((*p).y).write(YielderStateCell::default());
-      let y: &'s YielderStateCell<T, R> = &(*p).y;
-      let yielder = Yielder::<'s, T, R>::new(y);
+      let y: &'s YielderStateCell<Yield, Resume> = &(*p).y;
+      let yielder = Yielder::<'s, Yield, Resume>::new(y);
       let g = f(yielder);
       addr_of_mut!((*p).g).write(g);
     }
@@ -161,16 +171,18 @@ impl<'s, T: 's, R: 's, U, G> CoroBuilder<'s, T, R, U, G> {
   }
 }
 
-impl<'s, T, R, U, G> Coro<'s, T, R, U, G> {
-  pub fn new() -> CoroBuilder<'s, T, R, U, G> {
+impl<'s, Yield, Resume, Return, G>
+  Coro<'s, Yield, Resume, Return, G>
+{
+  pub fn new() -> CoroBuilder<'s, Yield, Resume, Return, G> {
     CoroBuilder(MaybeUninit::uninit())
   }
 }
 
 #[derive(Debug)]
-pub enum Output<T, U> {
-  Next(T),
-  Done(U),
+pub enum Output<Yield, Return> {
+  Next(Yield),
+  Done(Return),
 }
 
 pub trait Resumable {
@@ -199,13 +211,14 @@ pub trait Resumable {
   }
 }
 
-impl<'s, T: 's, R: 's, U, G> Resumable for Coro<'s, T, R, U, G>
+impl<'s, Yield: 's, Resume: 's, Return, G> Resumable
+  for Coro<'s, Yield, Resume, Return, G>
 where
-  G: Future<Output = U>,
+  G: Future<Output = Return>,
 {
-  type Yield = T;
-  type Return = U;
-  type Resume = R;
+  type Yield = Yield;
+  type Return = Return;
+  type Resume = Resume;
 
   fn feed(self: Pin<&mut Self>, x: Self::Resume) {
     // SAFETY: We never move the pointee or allow others to do so.
