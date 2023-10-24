@@ -341,24 +341,26 @@ pub trait MyIterator {
   fn next(&mut self) -> Option<Self::Item>;
 }
 
-impl<G: Generator + Unpin> MyIterator for G {
+impl<G: Generator> MyIterator for Pin<&mut G> {
   type Item = G::Item;
 
   fn next(&mut self) -> Option<Self::Item> {
-    <Self as Generator>::next(Pin::new(self))
+    <G as Generator>::next(self.as_mut())
   }
 }
 
 impl<'s, Yield, E, G> Iterator
-  for Coro<'s, Yield, (), Result<(), E>, G>
+  for Pin<&mut Coro<'s, Yield, (), Result<(), E>, G>>
 where
   Coro<'s, Yield, (), Result<(), E>, G>:
-    Generator<Item = Result<Yield, E>> + Unpin,
+    Generator<Item = Result<Yield, E>>,
 {
   type Item = Result<Yield, E>;
 
   fn next(&mut self) -> Option<Self::Item> {
-    <Self as Generator>::next(Pin::new(self))
+    <Coro<'s, Yield, (), Result<(), E>, G> as Generator>::next(
+      self.as_mut(),
+    )
   }
 }
 
@@ -566,5 +568,36 @@ mod tests {
     assert_eq!(Some(Ok(2)), g.as_mut().next());
     assert_eq!(Some(Err(())), g.as_mut().next());
     assert_eq!(None, g.as_mut().next());
+  }
+
+  #[test]
+  fn test_iterator_1() {
+    let g = pin!(Coro::new());
+    let mut g = g.init(move |mut y: Yielder<u8, ()>| async move {
+      y.r#yield(1).await;
+      y.r#yield(2).await;
+      y.r#yield(3).await;
+      Ok::<_, ()>(())
+    });
+    assert_eq!(Some(Ok(1)), Iterator::next(&mut g));
+    assert_eq!(Some(Ok(2)), Iterator::next(&mut g));
+    assert_eq!(Some(Ok(3)), Iterator::next(&mut g));
+    assert_eq!(None, Iterator::next(&mut g));
+  }
+
+  #[test]
+  fn test_iterator_2() {
+    let g = pin!(Coro::new());
+    let mut g = g.init(move |mut y: Yielder<u8, ()>| async move {
+      y.r#yield(1).await;
+      y.r#yield(2).await;
+      Err(())?;
+      y.r#yield(3).await;
+      Ok::<_, ()>(())
+    });
+    assert_eq!(Some(Ok(1)), Iterator::next(&mut g));
+    assert_eq!(Some(Ok(2)), Iterator::next(&mut g));
+    assert_eq!(Some(Err(())), Iterator::next(&mut g));
+    assert_eq!(None, Iterator::next(&mut g));
   }
 }
