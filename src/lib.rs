@@ -57,7 +57,7 @@ const fn nop_rawwaker() -> RawWaker {
   RawWaker::new(&() as *const (), &VTAB)
 }
 
-fn poll_once<T: Debug>(f: impl Future<Output = T>) -> Poll<T> {
+fn poll_once<T>(f: impl Future<Output = T>) -> Poll<T> {
   let mut f = pin!(f);
   let waker = unsafe { Waker::from_raw(nop_rawwaker()) };
   let mut cx = Context::from_waker(&waker);
@@ -95,11 +95,7 @@ pub struct Yielder<'s, T, R>(
   PhantomData<*mut &'s ()>,
 );
 
-impl<'s, T, R> Yielder<'s, T, R>
-where
-  T: Debug,
-  R: Debug,
-{
+impl<'s, T, R> Yielder<'s, T, R> {
   fn new(x: &'s YielderStateCell<T, R>) -> Self {
     Yielder::<'s, T, R>(x, PhantomData)
   }
@@ -131,7 +127,7 @@ pub struct Coro<'s, T, R, U, G> {
   _p: (PhantomData<(*mut &'s (), T, R, U)>, PhantomPinned),
 }
 
-impl<'s, T, R, U, G> CoroBuilder<'s, T, R, U, G> {
+impl<'s, T: 's, R: 's, U, G> CoroBuilder<'s, T, R, U, G> {
   pub fn init<F>(
     // SAFETY: The `'s` lifetime here is critical for shortening the
     // corresponding lifetime in the output type.  Without this, that
@@ -142,9 +138,6 @@ impl<'s, T, R, U, G> CoroBuilder<'s, T, R, U, G> {
   where
     F: FnOnce(Yielder<'s, T, R>) -> G,
     G: Future<Output = U>,
-    T: Debug + 's,
-    R: Debug + 's,
-    U: Debug,
   {
     // SAFETY: We never move the pointee or allow others to do so.
     let dst = unsafe { &mut self.get_unchecked_mut().0 };
@@ -205,12 +198,9 @@ pub trait Resumable {
   }
 }
 
-impl<'s, T, R, U, G> Resumable for Coro<'s, T, R, U, G>
+impl<'s, T: 's, R: 's, U, G> Resumable for Coro<'s, T, R, U, G>
 where
   G: Future<Output = U>,
-  T: Debug + 's,
-  R: Debug + 's,
-  U: Debug,
 {
   type StreamOutput = T;
   type FinalOutput = U;
