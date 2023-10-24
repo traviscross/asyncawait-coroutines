@@ -5,34 +5,23 @@ use core::{
   fmt::Debug,
   future::Future,
   marker::{PhantomData, PhantomPinned},
-  mem::{self, MaybeUninit},
+  mem::MaybeUninit,
   pin::{pin, Pin},
   ptr::addr_of_mut,
   task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
 mod debug {
-  use super::{Coro, CoroK, Debug, YielderState, YielderStateCell};
+  use super::{Coro, Debug, YielderState, YielderStateCell};
   use core::fmt;
 
-  impl<F, G> Debug for CoroK<F, G> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-      match self {
-        Self::Init(_) => write!(f, "Init(_, _)"),
-        Self::Gen(_) => write!(f, "Gen(_)"),
-        Self::Temporary => write!(f, "Temporary"),
-      }
-    }
-  }
-
-  impl<'s, T, R, U, F, G> Debug for Coro<'s, T, R, U, F, G>
+  impl<'s, T, R, U, G> Debug for Coro<'s, T, R, U, G>
   where
     T: Debug,
     R: Debug,
   {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       f.debug_struct("Coro")
-        .field("g", &self.g)
         .field("y", &self.y)
         .field("_p", &self._p)
         .finish()
@@ -132,30 +121,24 @@ where
   }
 }
 
-enum CoroK<F, G> {
-  Init(F),
-  Gen(G),
-  Temporary,
-}
-
-pub struct CoroBuilder<'s, T, R, U, F, G>(
-  MaybeUninit<Coro<'s, T, R, U, F, G>>,
+pub struct CoroBuilder<'s, T, R, U, G>(
+  MaybeUninit<Coro<'s, T, R, U, G>>,
 );
 
-pub struct Coro<'s, T, R, U, F, G> {
-  g: CoroK<F, G>, // Needs reference to `y`.
+pub struct Coro<'s, T, R, U, G> {
+  g: G, // Needs reference to `y`.
   y: YielderStateCell<T, R>,
   _p: (PhantomData<(*mut &'s (), T, R, U)>, PhantomPinned),
 }
 
-impl<'s, T, R, U, F, G> CoroBuilder<'s, T, R, U, F, G> {
-  pub fn init(
+impl<'s, T, R, U, G> CoroBuilder<'s, T, R, U, G> {
+  pub fn init<F>(
     // SAFETY: The `'s` lifetime here is critical for shortening the
     // corresponding lifetime in the output type.  Without this, that
     // lifetime could be too long, resulting in use-after-free.
     self: Pin<&'s mut Self>,
     f: F,
-  ) -> Pin<&'s mut Coro<'s, T, R, U, F, G>>
+  ) -> Pin<&'s mut Coro<'s, T, R, U, G>>
   where
     F: FnOnce(Yielder<'s, T, R>) -> G,
     G: Future<Output = U>,
@@ -169,9 +152,12 @@ impl<'s, T, R, U, F, G> CoroBuilder<'s, T, R, U, F, G> {
     // SAFETY: We only write to maybe-uninitialized fields, and we
     // take care to not drop old maybe-uninitialized values.
     unsafe {
-      addr_of_mut!((*p).g).write(CoroK::Init(f));
-      addr_of_mut!((*p).y).write(YielderStateCell::default());
       addr_of_mut!((*p)._p).write((PhantomData, PhantomPinned));
+      addr_of_mut!((*p).y).write(YielderStateCell::default());
+      let y: &'s YielderStateCell<T, R> = &(*p).y;
+      let yielder = Yielder::<'s, T, R>::new(y);
+      let g = f(yielder);
+      addr_of_mut!((*p).g).write(g);
     }
     // SAFETY: We have initialiized all fields.
     let dst = unsafe { dst.assume_init_mut() };
@@ -181,8 +167,8 @@ impl<'s, T, R, U, F, G> CoroBuilder<'s, T, R, U, F, G> {
   }
 }
 
-impl<'s, T, R, U, F, G> Coro<'s, T, R, U, F, G> {
-  pub fn new() -> CoroBuilder<'s, T, R, U, F, G> {
+impl<'s, T, R, U, G> Coro<'s, T, R, U, G> {
+  pub fn new() -> CoroBuilder<'s, T, R, U, G> {
     CoroBuilder(MaybeUninit::uninit())
   }
 }
@@ -198,8 +184,6 @@ pub trait Resumable {
   type FinalOutput;
   type Input;
 
-  fn initialize(self: Pin<&mut Self>);
-
   fn feed(self: Pin<&mut Self>, x: Self::Input);
 
   fn advance(
@@ -207,9 +191,8 @@ pub trait Resumable {
   ) -> Output<Self::StreamOutput, Self::FinalOutput>;
 
   fn start(
-    mut self: Pin<&mut Self>,
+    self: Pin<&mut Self>,
   ) -> Output<Self::StreamOutput, Self::FinalOutput> {
-    self.as_mut().initialize();
     self.advance()
   }
 
@@ -222,9 +205,8 @@ pub trait Resumable {
   }
 }
 
-impl<'s, T, R, U, F, G> Resumable for Coro<'s, T, R, U, F, G>
+impl<'s, T, R, U, G> Resumable for Coro<'s, T, R, U, G>
 where
-  F: FnOnce(Yielder<'s, T, R>) -> G,
   G: Future<Output = U>,
   T: Debug + 's,
   R: Debug + 's,
@@ -233,36 +215,6 @@ where
   type StreamOutput = T;
   type FinalOutput = U;
   type Input = R;
-
-  fn initialize(self: Pin<&mut Self>) {
-    // SAFETY: We never move the pointee or allow others to do so.
-    let self_ = unsafe { self.get_unchecked_mut() };
-    let y: &'_ YielderStateCell<T, R> = &self_.y;
-    match y.replace(YielderState::Temporary) {
-      YielderState::Temporary => {}
-      _ => unreachable!(),
-    }
-    match mem::replace(&mut self_.g, CoroK::Temporary) {
-      CoroK::Init(f) => {
-        // SAFETY: We initialized `Coro<'s, ..>` such that `'s` is
-        // equal to the lifetime of some pinned mutable reference to
-        // `Self`, so we know that `Self: 's`.  Since `Self` is
-        // pinned, we know that it won't move out from under us for at
-        // least this long.
-        //
-        // The remaining thing we have to worry about is the
-        // possibility that a mutable reference has been handed out to
-        // this data and that we'd be aliasing it.  Since we don't
-        // hand out any mutable references to this field, that's not
-        // possible, so this is OK.
-        let y: &'s YielderStateCell<T, R> =
-          unsafe { mem::transmute(y) };
-        let yielder = Yielder::<'s, T, R>::new(y);
-        self_.g = CoroK::Gen(f(yielder));
-      }
-      _ => unreachable!(),
-    };
-  }
 
   fn feed(self: Pin<&mut Self>, x: Self::Input) {
     // SAFETY: We never move the pointee or allow others to do so.
@@ -280,7 +232,7 @@ where
   ) -> Output<Self::StreamOutput, Self::FinalOutput> {
     // SAFETY: We never move the pointee or allow others to do so.
     let self_ = unsafe { self.get_unchecked_mut() };
-    let CoroK::Gen(ref mut g) = self_.g else { unreachable!() };
+    let ref mut g = self_.g;
     // SAFETY: This is a pin projection; we're treating this field as
     // structual.  This is safe because 1) our type is `!Unpin`, 2)
     // `drop` does not move out of this field, 3) we uphold the `Drop`
@@ -326,7 +278,7 @@ let Output::Done(mut boom) = ({
 boom.r#yield(()); // Pointer is dangling here.
 ```
 
-```compile_fail,E0499,E0716
+```compile_fail,E0716
 use coroutines_demo::*;
 use core::pin::pin;
 let mut boom = None;
@@ -361,7 +313,7 @@ let Output::Done(mut boom) = ({
 boom.r#yield(()); // OK?
 ```
 
-```compile_fail,E0499,E0716
+```compile_fail,E0716
 use coroutines_demo::*;
 use core::pin::pin;
 let g = Coro::new();
