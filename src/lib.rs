@@ -67,17 +67,17 @@ fn resume_unwind(_: core::convert::Infallible) -> ! {
 pub trait Captures<T: ?Sized> {}
 impl<T: ?Sized, U: ?Sized> Captures<T> for U {}
 
-const fn nop_rawwaker() -> RawWaker {
+const NOP_RAWWAKER: RawWaker = {
   fn nop(_: *const ()) {}
   const VTAB: RawWakerVTable =
-    RawWakerVTable::new(|_| nop_rawwaker(), nop, nop, nop);
+    RawWakerVTable::new(|_| NOP_RAWWAKER, nop, nop, nop);
   RawWaker::new(&() as *const (), &VTAB)
-}
+};
 
 fn poll_once<T>(f: impl Future<Output = T>) -> Poll<T> {
   let mut f = pin!(f);
   // SAFETY: Our raw waker does nothing.
-  let waker = unsafe { Waker::from_raw(nop_rawwaker()) };
+  let waker = unsafe { Waker::from_raw(NOP_RAWWAKER) };
   let mut cx = Context::from_waker(&waker);
   f.as_mut().poll(&mut cx)
 }
