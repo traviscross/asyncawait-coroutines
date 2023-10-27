@@ -398,6 +398,56 @@ let mut boom = None;
 boom.as_mut().unwrap().r#yield(()); // Pointer is dangling here.
 ```
 
+```compile_fail,E0597
+use coroutines_demo::*;
+use core::pin::pin;
+let g = pin!(Coro::new());
+let mut g = g.init(|mut y: Yielder<(), &()>| {
+  async move {
+    let boom = y.r#yield(()).await;
+    _ = y.r#yield(());
+  }
+});
+_ = g.as_mut().start();
+{
+  let boom = ();
+  _ = g.as_mut().resume(&boom);
+}
+_ = g.as_mut().resume(&()); // Pointer is dangling here.
+```
+
+```compile_fail,E0597
+use coroutines_demo::*;
+use core::pin::pin;
+let boom = {
+  let g = pin!(Coro::new());
+  let mut g = g.init(|mut y: Yielder<&(), ()>| {
+    async move {
+      let boom = ();
+      y.r#yield(&boom).await;
+    }
+  });
+  g.as_mut().start()
+};
+_ = (boom,); // Pointer is dangling here.
+```
+
+```compile_fail,E0597
+use coroutines_demo::*;
+use core::pin::pin;
+let boom = {
+  let g = pin!(Coro::new());
+  let mut g = g.init(|mut y: Yielder<&(), ()>| {
+    let boom = ();
+    async move {
+      y.r#yield(&boom).await;
+    }
+  });
+  g.as_mut().start()
+};
+_ = (boom,); // Pointer is dangling here.
+```
+
 ## Correctness tests
 
 These examples would not be undefined behavior if they were to
@@ -433,6 +483,39 @@ let mut boom = None;
 }
 boom.as_mut().unwrap().r#yield(()); // OK?
 ```
+
+```compile_fail,E0597
+use coroutines_demo::*;
+use core::pin::pin;
+let g = pin!(Coro::new());
+let boom = {
+  let mut g = g.init(|mut y: Yielder<&(), ()>| {
+    async move {
+      let boom = ();
+      y.r#yield(&boom).await;
+    }
+  });
+  g.as_mut().start()
+};
+_ = (boom,); // OK?
+```
+
+```compile_fail,E0597
+use coroutines_demo::*;
+use core::pin::pin;
+let g = pin!(Coro::new());
+let boom = {
+  let mut g = g.init(|mut y: Yielder<&(), ()>| {
+    let boom = ();
+    async move {
+      y.r#yield(&boom).await;
+    }
+  });
+  g.as_mut().start()
+};
+_ = (boom,); // OK?
+```
+
 */
 #[allow(dead_code)]
 #[doc(hidden)]
