@@ -16,8 +16,8 @@ mod debug {
   use super::{Coro, Debug, YielderState, YielderStateCell};
   use core::fmt;
 
-  impl<'s, Yield: Debug, Resume: Debug, Return, G> Debug
-    for Coro<'s, Yield, Resume, Return, G>
+  impl<Yield: Debug, Resume: Debug, Return, G> Debug
+    for Coro<Yield, Resume, Return, G>
   {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
       f.debug_struct("Coro")
@@ -140,8 +140,8 @@ impl<'s, Yield, Resume> Yielder<'s, Yield, Resume> {
   }
 }
 
-pub struct CoroBuilder<'s, Yield, Resume, Return, G>(
-  MaybeUninit<Coro<'s, Yield, Resume, Return, G>>,
+pub struct CoroBuilder<Yield, Resume, Return, G>(
+  MaybeUninit<Coro<Yield, Resume, Return, G>>,
 );
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,26 +151,18 @@ enum RunState {
   Done,
 }
 
-pub struct Coro<'s, Yield, Resume, Return, G> {
+pub struct Coro<Yield, Resume, Return, G> {
   future: G, // May hold self-reference to `state`.
   state: YielderStateCell<Yield, Resume>,
   run_state: RunState,
-  _phantom: (
-    PhantomData<(*mut &'s (), Yield, Resume, Return)>,
-    PhantomPinned,
-  ),
+  _phantom: (PhantomData<(Yield, Resume, Return)>, PhantomPinned),
 }
 
-impl<'s, Yield: 's, Resume: 's, Return, G>
-  CoroBuilder<'s, Yield, Resume, Return, G>
-{
-  pub fn init<F>(
-    // SAFETY: The `'s` lifetime here is critical for shortening the
-    // corresponding lifetime in the output type.  Without this, that
-    // lifetime could be too long, resulting in use-after-free.
+impl<Yield, Resume, Return, G> CoroBuilder<Yield, Resume, Return, G> {
+  pub fn init<'s, F>(
     self: Pin<&'s mut Self>,
     f: F,
-  ) -> Pin<&'s mut Coro<'s, Yield, Resume, Return, G>>
+  ) -> Pin<&'s mut Coro<Yield, Resume, Return, G>>
   where
     F: FnOnce(Yielder<'s, Yield, Resume>) -> G,
     G: Future<Output = Return>,
@@ -203,10 +195,8 @@ impl<'s, Yield: 's, Resume: 's, Return, G>
   }
 }
 
-impl<'s, Yield, Resume, Return, G>
-  Coro<'s, Yield, Resume, Return, G>
-{
-  pub fn new() -> CoroBuilder<'s, Yield, Resume, Return, G> {
+impl<Yield, Resume, Return, G> Coro<Yield, Resume, Return, G> {
+  pub fn new() -> CoroBuilder<Yield, Resume, Return, G> {
     CoroBuilder(MaybeUninit::uninit())
   }
 }
@@ -248,8 +238,8 @@ pub trait Resumable {
   }
 }
 
-impl<'s, Yield: 's, Resume: 's, Return, G> Resumable
-  for Coro<'s, Yield, Resume, Return, G>
+impl<Yield, Resume, Return, G> Resumable
+  for Coro<Yield, Resume, Return, G>
 where
   G: Future<Output = Return>,
 {
@@ -349,16 +339,16 @@ impl<G: Generator> MyIterator for Pin<&mut G> {
   }
 }
 
-impl<'s, Yield, E, G> Iterator
-  for Pin<&mut Coro<'s, Yield, (), Result<(), E>, G>>
+impl<Yield, E, G> Iterator
+  for Pin<&mut Coro<Yield, (), Result<(), E>, G>>
 where
-  Coro<'s, Yield, (), Result<(), E>, G>:
+  Coro<Yield, (), Result<(), E>, G>:
     Generator<Item = Result<Yield, E>>,
 {
   type Item = Result<Yield, E>;
 
   fn next(&mut self) -> Option<Self::Item> {
-    <Coro<'s, Yield, (), Result<(), E>, G> as Generator>::next(
+    <Coro<Yield, (), Result<(), E>, G> as Generator>::next(
       self.as_mut(),
     )
   }
