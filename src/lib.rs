@@ -1,7 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use core::{
-  cell::Cell,
   fmt::Debug,
   future::Future,
   marker::{PhantomData, PhantomPinned},
@@ -13,7 +12,7 @@ use core::{
 };
 
 mod debug {
-  use super::{Coro, Debug, YielderState, YielderStateCell};
+  use super::{Coro, Debug};
   use core::fmt;
 
   impl<Yield: Debug, Resume: Debug, Return, G> Debug
@@ -25,17 +24,6 @@ mod debug {
         .field("run_state", &self.run_state)
         .field("_phantom", &self._phantom)
         .finish()
-    }
-  }
-
-  impl<Yield: Debug, Resume: Debug> Debug
-    for YielderStateCell<Yield, Resume>
-  {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-      let v = self.0.replace(YielderState::Temporary);
-      let r = f.debug_tuple("YielderStateCell").field(&v).finish();
-      self.0.set(v);
-      r
     }
   }
 }
@@ -67,6 +55,18 @@ fn resume_unwind(_: core::convert::Infallible) -> ! {
 pub trait Captures<T: ?Sized> {}
 impl<T: ?Sized, U: ?Sized> Captures<T> for U {}
 
+#[derive(
+  Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+struct PhantomNotSync {
+  _phantom: PhantomData<*const ()>,
+}
+// SAFETY: The type is trivial.
+unsafe impl Send for PhantomNotSync {}
+#[allow(non_upper_case_globals)]
+const PhantomNotSync: PhantomNotSync =
+  PhantomNotSync { _phantom: PhantomData };
+
 const NOP_RAWWAKER: RawWaker = {
   fn nop(_: *const ()) {}
   const VTAB: RawWakerVTable =
@@ -90,36 +90,14 @@ enum YielderState<Yield, Resume> {
   Output(Yield),
 }
 
-struct YielderStateCell<Yield, Resume>(
-  Cell<YielderState<Yield, Resume>>,
-);
-
-impl<Yield, Resume> YielderStateCell<Yield, Resume> {
-  pub fn replace(
-    &self,
-    x: YielderState<Yield, Resume>,
-  ) -> YielderState<Yield, Resume> {
-    self.0.replace(x)
-  }
-  pub fn set(&self, x: YielderState<Yield, Resume>) {
-    self.0.set(x);
-  }
-}
-
-impl<Yield, Resume> Default for YielderStateCell<Yield, Resume> {
-  fn default() -> Self {
-    Self(Cell::new(YielderState::default()))
-  }
-}
-
 #[derive(Debug)]
 pub struct Yielder<'s, Yield, Resume>(
-  &'s YielderStateCell<Yield, Resume>,
+  *mut YielderState<Yield, Resume>,
   PhantomData<*mut &'s ()>,
 );
 
 impl<'s, Yield, Resume> Yielder<'s, Yield, Resume> {
-  fn new(x: &'s YielderStateCell<Yield, Resume>) -> Self {
+  fn new(x: *mut YielderState<Yield, Resume>) -> Self {
     Yielder::<'s, Yield, Resume>(x, PhantomData)
   }
   pub fn r#yield(
@@ -128,9 +106,13 @@ impl<'s, Yield, Resume> Yielder<'s, Yield, Resume> {
   ) -> impl Future<Output = Resume> + Captures<(&'_ (), &'s ())> {
     let mut x = Some(x);
     core::future::poll_fn(move |_| {
-      match self.0.replace(YielderState::Temporary) {
+      let state = self.0;
+      // SAFETY: We have initialized and aligned the state.
+      match unsafe { state.replace(YielderState::Temporary) } {
         YielderState::Temporary => {
-          self.0.set(YielderState::Output(x.take().unwrap()));
+          let x = x.take().unwrap();
+          // SAFETY: We have initialized and aligned the state.
+          unsafe { *state = YielderState::Output(x) };
           Poll::Pending
         }
         YielderState::Input(r) => Poll::Ready(r),
@@ -153,9 +135,13 @@ enum RunState {
 
 pub struct Coro<Yield, Resume, Return, G> {
   future: G, // May hold self-reference to `state`.
-  state: YielderStateCell<Yield, Resume>,
+  state: YielderState<Yield, Resume>,
   run_state: RunState,
-  _phantom: (PhantomData<(Yield, Resume, Return)>, PhantomPinned),
+  _phantom: (
+    PhantomData<(Yield, Resume, Return)>,
+    PhantomPinned,
+    PhantomNotSync,
+  ),
 }
 
 impl<Yield, Resume, Return, G> CoroBuilder<Yield, Resume, Return, G> {
@@ -173,9 +159,9 @@ impl<Yield, Resume, Return, G> CoroBuilder<Yield, Resume, Return, G> {
     // SAFETY: We only write to maybe-uninitialized fields, and we
     // take care to not drop old maybe-uninitialized values.
     unsafe {
-      addr_of_mut!((*p).state).write(YielderStateCell::default());
-      let state: &'s YielderStateCell<Yield, Resume> = &(*p).state;
-      let yielder = Yielder::<'s, Yield, Resume>::new(state);
+      addr_of_mut!((*p).state).write(YielderState::default());
+      let yielder =
+        Yielder::<'s, Yield, Resume>::new(addr_of_mut!((*p).state));
       let g = match catch_unwind(AssertUnwindSafe(|| f(yielder))) {
         Ok(x) => x,
         Err(e) => {
@@ -185,7 +171,11 @@ impl<Yield, Resume, Return, G> CoroBuilder<Yield, Resume, Return, G> {
       };
       addr_of_mut!((*p).future).write(g);
       addr_of_mut!((*p).run_state).write(RunState::NotStarted);
-      addr_of_mut!((*p)._phantom).write((PhantomData, PhantomPinned));
+      addr_of_mut!((*p)._phantom).write((
+        PhantomData,
+        PhantomPinned,
+        PhantomNotSync,
+      ));
     }
     // SAFETY: We have initialiized all fields.
     let dst = unsafe { dst.assume_init_mut() };
@@ -259,12 +249,14 @@ where
     // SAFETY: We never move the pointee or allow others to do so.
     let this = unsafe { self.get_unchecked_mut() };
     assert!(this.is_started());
-    let state = &this.state;
-    match state.replace(YielderState::Temporary) {
+    let state = addr_of_mut!(this.state);
+    // SAFETY: We have initialized and aligned the state.
+    match unsafe { state.replace(YielderState::Temporary) } {
       YielderState::Temporary => {}
       _ => unreachable!(),
     }
-    state.set(YielderState::Input(x));
+    // SAFETY: We have initialized and aligned the state.
+    unsafe { *state = YielderState::Input(x) };
   }
 
   fn advance(
@@ -282,8 +274,9 @@ where
     let g = unsafe { Pin::new_unchecked(g) };
     match poll_once(g) {
       Poll::Ready(x) => {
-        let state = &this.state;
-        match state.replace(YielderState::Temporary) {
+        let state = addr_of_mut!(this.state);
+        // SAFETY: We have initialized and aligned the state.
+        match unsafe { state.replace(YielderState::Temporary) } {
           YielderState::Temporary => {}
           _ => unreachable!(),
         }
@@ -291,8 +284,9 @@ where
         Output::Done(x)
       }
       Poll::Pending => {
-        let state = &this.state;
-        match state.replace(YielderState::Temporary) {
+        let state = addr_of_mut!(this.state);
+        // SAFETY: We have initialized and aligned the state.
+        match unsafe { state.replace(YielderState::Temporary) } {
           YielderState::Output(x) => Output::Next(x),
           _ => unreachable!(),
         }
@@ -514,6 +508,43 @@ fn test_compile_fail() {}
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  macro_rules! not_impl {
+    ($tr:path, $ty:ty) => {
+      trait Amb<T> {
+        fn x() {}
+      }
+      impl<T> Amb<()> for T {}
+      impl<T: $tr> Amb<((),)> for T {}
+      _ = <$ty as Amb<_>>::x;
+    };
+  }
+
+  #[test]
+  fn test_coro_send() {
+    fn is_send<T: Send>() {}
+    is_send::<Coro<(), (), (), core::future::Ready<()>>>();
+  }
+
+  #[test]
+  fn test_coro_not_sync() {
+    not_impl!(Sync, Coro<(), (), (), core::future::Ready<()>>);
+  }
+
+  #[test]
+  fn test_coro_not_unpin() {
+    not_impl!(Unpin, Coro<(), (), (), core::future::Ready<()>>);
+  }
+
+  #[test]
+  fn test_yielder_not_send() {
+    not_impl!(Send, Yielder<(), ()>);
+  }
+
+  #[test]
+  fn test_yielder_not_sync() {
+    not_impl!(Sync, Yielder<(), ()>);
+  }
 
   #[test]
   fn test_steps() {
