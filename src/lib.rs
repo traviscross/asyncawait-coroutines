@@ -7,7 +7,7 @@ use core::{
   mem::MaybeUninit,
   panic::AssertUnwindSafe,
   pin::{pin, Pin},
-  ptr::{addr_of_mut, drop_in_place},
+  ptr::{addr_of_mut, drop_in_place, NonNull},
   task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
@@ -92,12 +92,12 @@ enum YielderState<Yield, Resume> {
 
 #[derive(Debug)]
 pub struct Yielder<'s, Yield, Resume>(
-  *mut YielderState<Yield, Resume>,
+  NonNull<YielderState<Yield, Resume>>,
   PhantomData<*mut &'s ()>,
 );
 
 impl<'s, Yield, Resume> Yielder<'s, Yield, Resume> {
-  fn new(x: *mut YielderState<Yield, Resume>) -> Self {
+  fn new(x: NonNull<YielderState<Yield, Resume>>) -> Self {
     Yielder::<'s, Yield, Resume>(x, PhantomData)
   }
   pub fn r#yield(
@@ -106,7 +106,7 @@ impl<'s, Yield, Resume> Yielder<'s, Yield, Resume> {
   ) -> impl Future<Output = Resume> + Captures<(&'_ (), &'s ())> {
     let mut x = Some(x);
     core::future::poll_fn(move |_| {
-      let state = self.0;
+      let state = self.0.as_ptr();
       // SAFETY: We have initialized and aligned the state.
       match unsafe { state.replace(YielderState::Temporary) } {
         YielderState::Temporary => {
@@ -159,9 +159,10 @@ impl<Yield, Resume, Return, G> CoroBuilder<Yield, Resume, Return, G> {
     // SAFETY: We only write to maybe-uninitialized fields, and we
     // take care to not drop old maybe-uninitialized values.
     unsafe {
-      addr_of_mut!((*p).state).write(YielderState::default());
-      let yielder =
-        Yielder::<'s, Yield, Resume>::new(addr_of_mut!((*p).state));
+      // SAFETY: The pointer is created here and is not null.
+      let state = NonNull::new_unchecked(addr_of_mut!((*p).state));
+      state.as_ptr().write(YielderState::default());
+      let yielder = Yielder::<'s, Yield, Resume>::new(state);
       let g = match catch_unwind(AssertUnwindSafe(|| f(yielder))) {
         Ok(x) => x,
         Err(e) => {
