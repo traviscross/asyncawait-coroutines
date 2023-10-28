@@ -162,6 +162,8 @@ impl<Yield, Resume, Return, G> CoroBuilder<Yield, Resume, Return, G> {
       // SAFETY: The pointer is created here and is not null.
       let state = NonNull::new_unchecked(addr_of_mut!((*p).state));
       state.as_ptr().write(YielderState::default());
+      // SAFETY: The yielder must contain the `'s` lifetime so that it
+      // cannot outlive our reference to `Self`.
       let yielder = Yielder::<'s, Yield, Resume>::new(state);
       let g = match catch_unwind(AssertUnwindSafe(|| f(yielder))) {
         Ok(x) => x,
