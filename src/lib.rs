@@ -74,7 +74,9 @@ const NOP_RAWWAKER: RawWaker = {
   RawWaker::new(&() as *const (), &VTAB)
 };
 
-fn poll_once<T>(f: impl Future<Output = T>) -> Poll<T> {
+// We export this only so it can be used in doc tests.
+#[doc(hidden)]
+pub fn poll_once<T>(f: impl Future<Output = T>) -> Poll<T> {
   let mut f = pin!(f);
   // SAFETY: Our raw waker does nothing.
   let waker = unsafe { Waker::from_raw(NOP_RAWWAKER) };
@@ -100,13 +102,45 @@ impl<'s, Yield, Resume> Yielder<'s, Yield, Resume> {
   fn new(x: NonNull<YielderState<Yield, Resume>>) -> Self {
     Yielder::<'s, Yield, Resume>(x, PhantomData)
   }
-  pub fn r#yield(
+  pub fn r#yield<'o>(
     &mut self,
     x: Yield,
-  ) -> impl Future<Output = Resume> + Captures<(&'_ (), &'s ())> {
+    // We'll capture all lifetimes in scope for compatibility with the
+    // Rust 2024 lifetime capture rules.  We only want to capture
+    // `'s`; the capture of `'_` is an overcapture.  When
+    // rust-lang/rust#116733 lands, the explicit outlives bound and
+    // the where clauses below will somewhat minimize the effect of
+    // this overcapture.
+  ) -> impl Future<Output = Resume> + Captures<(&'s (), &'_ ())> + 'o
+  where
+    's: 'o,
+    Yield: 'o,
+    Resume: 'o,
+  {
     let mut x = Some(x);
+    // We'll avoid capturing `&mut self` in the returned future by
+    // getting the `NonNull` pointer here.  We'll leave it to be
+    // captured as `NonNull` rather than as `*mut` so that variance is
+    // preserved.
+    //
+    // Interestingly, if we were to capture `&mut self` or `&mut
+    // self.0` (but not `&self.0`), then we would get a Stacked
+    // Borrows (but not Tree Borrows) error when trying to read the
+    // pointer within the future.
+    let state = self.0;
+    let phantom = PhantomData::<&'s ()>;
     core::future::poll_fn(move |_| {
-      let state = self.0.as_ptr();
+      let state = state.as_ptr();
+      // SAFETY: We need the type of the returned future to contain
+      // the `'s` lifetime.  If it did not, then the future could
+      // escape and outlive the state to which it holds a pointer.
+      //
+      // The fact that `'s` is captured by the opaque type is enough
+      // under the current rules, and the fact that `'s: 'o` makes it
+      // enough under the conceivable future rules, but actually
+      // capturing the lifetime in the hidden type will always be
+      // enough, so let's do that.
+      let _phantom = phantom;
       // SAFETY: We have initialized and aligned the state.
       match unsafe { state.replace(YielderState::Temporary) } {
         YielderState::Temporary => {
@@ -370,6 +404,21 @@ let Output::Done(mut boom) = ({
 boom.r#yield(()); // Pointer is dangling here.
 ```
 
+```compile_fail,E0515,E0716
+use coroutines_demo::*;
+use core::pin::pin;
+let Output::Done(mut boom) = ({
+  let g = pin!(Coro::new());
+  let g = g.init(|mut y: Yielder<(), ()>| async move {
+    y.r#yield(())
+  });
+  g.start()
+}) else {
+  unreachable!()
+};
+_ = poll_once(boom); // Pointer is dangling here.
+```
+
 ```compile_fail,E0716
 use coroutines_demo::*;
 use core::pin::pin;
@@ -383,6 +432,21 @@ let mut boom = None;
   g.start();
 }
 boom.as_mut().unwrap().r#yield(()); // Pointer is dangling here.
+```
+
+```compile_fail,E0597,E0716
+use coroutines_demo::*;
+use core::pin::pin;
+let mut boom = None;
+{
+  let g = pin!(Coro::new());
+  let g = g.init(|mut y: Yielder<(), ()>| {
+    _ = boom.insert(y.r#yield(()));
+    async move {}
+  });
+  g.start();
+}
+_ = poll_once(boom.as_mut().unwrap()); // Pointer is dangling here.
 ```
 
 ```compile_fail,E0597
